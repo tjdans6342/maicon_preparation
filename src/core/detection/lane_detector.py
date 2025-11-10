@@ -27,7 +27,7 @@ class LaneDetector:
             tcp_nodelay=True
         )
 
-        rospy.loginfo(f"📷 LaneDetector subscribed to {image_topic}")
+        rospy.loginfo("📷 LaneDetector subscribed to {}".format(image_topic))
 
     # -------------------------------------------------------
     #  이미지 콜백
@@ -73,9 +73,9 @@ class LaneDetector:
 
                 slope_deg = 90 - np.degrees(np.arctan2(b, a))
                 if abs(slope_deg) < 10 or abs(slope_deg - 180) < 10:
-                    cv2.line(out, (x1, y1), (x2, y2), 100, 20)
+                    cv2.line(out, (x1, y1), (x2, y2), 100, 5)
                 else:
-                    cv2.line(out, (x1, y1), (x2, y2), 255, 8)
+                    cv2.line(out, (x1, y1), (x2, y2), 255, 2)
         return out
 
     # -------------------------------------------------------
@@ -119,7 +119,8 @@ class LaneDetector:
 
         fit = np.polyfit(y_list, x_list, 2)
         center_x_bottom = np.polyval(fit, h)
-        offset = (w / 2) - center_x_bottom  # 왼쪽이 +, 오른쪽이 -
+        distance = (w / 2) - center_x_bottom # 왼쪽이 +, 오른쪽이 -
+        offset = distance / (w / 2) # 0.0 ~ ±1.0 로 정규화
         heading = np.arctan(fit[1])  # 기울기 근사
         return {"heading": heading, "offset": offset}
 
@@ -141,10 +142,47 @@ class LaneDetector:
         blur = cv2.GaussianBlur(bev, (7, 7), 5)
         filtered = self._color_filter(blur)
 
-        # 2️⃣ 이진화 + Hough
+        # 2️⃣ 이진화 + canny + Hough
         gray = cv2.cvtColor(filtered, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, 20, 255, cv2.THRESH_BINARY)
-        hough_img = self._hough_transform(binary)
+        canny = cv2.Canny(binary, 10, 100)
+        hough_img = self._hough_transform(canny)
+
+
+        cv2.namedWindow('Original')
+        cv2.moveWindow('Original', 0, 0)
+        cv2.imshow('Original', image)
+
+        cv2.namedWindow('BEV')
+        cv2.moveWindow('BEV', 800, 0)
+        cv2.imshow('BEV', bev)
+        
+        cv2.namedWindow('Blurred')
+        cv2.moveWindow('Blurred', 1300, 0)
+        cv2.imshow('Blurred', blur)
+        
+        cv2.namedWindow('Color filter')
+        cv2.moveWindow('Color filter', 0, 500)
+        # cv2.circle(filtered, (240,240), 2, (255,255,255), thickness=-1)
+        cv2.imshow('Color filter', filtered)
+        
+        cv2.namedWindow('binary')
+        cv2.moveWindow('binary', 500, 500)
+        cv2.imshow('binary', binary)
+
+        cv2.namedWindow('Canny')
+        cv2.moveWindow('Canny', 1000, 500)
+        cv2.imshow('Canny', canny)
+
+        cv2.namedWindow('Hough')
+        cv2.moveWindow('Hough', 1500, 500)
+        cv2.imshow('Hough', hough_img)
+
+        # cv2.namedWindow('Sliding Window')
+        # cv2.moveWindow('Sliding Window', 1400, 0)
+        # cv2.imshow("Sliding Window", out_img)
+
+        cv2.waitKey(1)
 
         # 3️⃣ Sliding window로 중심선 계산
         result = self._sliding_window_center(hough_img)
@@ -163,5 +201,5 @@ if __name__ == "__main__":
         if detector.image is not None:
             res = detector.detect()
             if res:
-                rospy.loginfo(f"[Lane] heading={res['heading']:.3f}, offset={res['offset']:.1f}")
+                rospy.loginfo("[Lane] heading={:.3f}, offset={:.1f}".format(res['heading'], res['offset']))
         rate.sleep()

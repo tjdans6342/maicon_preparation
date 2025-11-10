@@ -140,7 +140,7 @@ class ArucoTrigger:
             self.mode = "EXECUTE_ACTION"
             self.last_trigger_times[mid] = now
             self._consec = {}
-            rospy.loginfo(f"🔸 ArUco ID={mid} triggered | sequence={self.pending_actions}")
+            rospy.loginfo("🔸 ArUco ID={} triggered | sequence={}".format(mid, self.pending_actions))
             return True
 
         return False

@@ -40,7 +40,7 @@ class FireDetector:
             tcp_nodelay=True
         )
 
-        rospy.loginfo(f"🔥 FireDetector initialized — listening to {topic_name}")
+        rospy.loginfo("🔥 FireDetector initialized — listening to {}".format(topic_name))
 
     # -------------------------------------------------------
     #  이미지 콜백
@@ -49,7 +49,7 @@ class FireDetector:
         try:
             frame = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except Exception as e:
-            rospy.logerr(f"[FireDetector] image conversion failed: {e}")
+            rospy.logerr("[FireDetector] image conversion failed: {}".format(e))
             return
 
         self._process_frame(frame)

@@ -11,7 +11,7 @@ class PIDController:
     - P: 즉각적 반응 / I: 누적 오차 보정 / D: 변화율 억제
     """
 
-    def __init__(self, kp=0.6, ki=0.001, kd=0.02, integral_limit=None):
+    def __init__(self, kp=0.65, ki=0.001, kd=0.01, integral_limit=2.0):
         """
         Parameters
         ----------
@@ -55,7 +55,7 @@ class PIDController:
         if self.prev_time is None:
             dt = 0.0
         else:
-            dt = max(current_time - self.prev_time, 1e-6)
+            dt = max(current_time - self.prev_time, 0.0)
 
         # 미분 항
         derivative = (error - self.prev_error) / dt if dt > 0 else 0.0
@@ -87,4 +87,4 @@ class PIDController:
     #  디버깅용 문자열 출력
     # -------------------------------------------------------
     def __repr__(self):
-        return f"<PIDController kp={self.kp}, ki={self.ki}, kd={self.kd}>"
+        return "<PIDController kp={}, ki={}, kd={}>".format(self.kp, self.ki, self.kd)

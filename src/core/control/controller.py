@@ -15,7 +15,7 @@ class Controller:
     def __init__(self, topic_name="/cmd_vel"):
         self.pub = rospy.Publisher(topic_name, Twist, queue_size=1)
         self._last_cmd = Twist()
-        rospy.loginfo(f"🕹️ Controller initialized → publishing to {topic_name}")
+        rospy.loginfo("🕹️ Controller initialized → publishing to {}".format(topic_name))
 
     # -------------------------------------------------------
     #  퍼블리시 함수 (로봇 이동 명령)
@@ -29,6 +29,7 @@ class Controller:
         msg.linear.x = float(linear)
         msg.angular.z = float(angular)
         self.pub.publish(msg)
+
         self._last_cmd = msg
 
     # -------------------------------------------------------

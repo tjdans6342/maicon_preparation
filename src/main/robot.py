@@ -3,11 +3,13 @@
 
 import rospy
 import time
-from lane_detector import LaneDetector
-from fire_detector import FireDetector
-from aruco_trigger import ArucoTrigger
-from pid_controller import PIDController
-from controller import Controller
+import numpy as np
+
+from ..core.detection.lane_detector import LaneDetector
+from ..core.detection.fire_detector import FireDetector
+from ..core.detection.aruco_trigger import ArucoTrigger
+from ..core.control.pid_controller import PIDController
+from ..core.control.controller import Controller
 
 
 class Robot:
@@ -23,7 +25,7 @@ class Robot:
         rospy.loginfo("🤖 Robot system initializing...")
 
         # --- 서브 모듈 초기화 ---
-        self.lane = LaneDetector(topic_name="/usb_cam/image_raw/compressed")
+        self.lane = LaneDetector(image_topic="/usb_cam/image_raw/compressed")
         self.aruco = ArucoTrigger(cmd_topic="/cmd_vel")
         self.controller = Controller("/cmd_vel")
         self.pid = PIDController(kp=0.65, ki=0.001, kd=0.01, integral_limit=2.0)
@@ -43,7 +45,7 @@ class Robot:
     #  차선 기반 주행 모드
     # -------------------------------------------------------
     def _lane_follow(self):
-        lane_info = self.lane.get_lane_info()
+        lane_info = self.lane.detect()
         if lane_info is None:
             rospy.logwarn_throttle(1.0, "[Lane] No lane detected.")
             self.controller.stop()
@@ -57,10 +59,14 @@ class Robot:
 
         # PID 계산
         control = self.pid.update(combined_err, rospy.get_time())
-        control = max(min(control, 1.5), -1.5) # -1.5 ~ 1.5 제한
+        control = np.clip(control, -1.5, 1.5) # -1.5 ~ 1.5 제한
 
         # 주행 명령 퍼블리시
         self.controller.publish(linear=self.base_speed, angular=control)
+
+        print("angle(rad): ", heading_err, "lat_norm: ", lateral_err)
+        print("cmd_ang: ", control)
+
         self.aruco.step()  # 아루코 액션 중이면 계속 실행
 
     # -------------------------------------------------------
@@ -84,7 +90,7 @@ class Robot:
     def _check_mode_transition(self):
         # --- 아루코 감지 먼저 실행 ---
         if self.mode == "LANE_FOLLOW":
-            frame = self.lane.get_latest_frame()
+            frame = self.lane.image
             if frame is not None:
                 self.aruco.observe_and_maybe_trigger(frame)
 
