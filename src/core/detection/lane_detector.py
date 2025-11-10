@@ -8,8 +8,8 @@ import rospy
 from cv_bridge import CvBridge
 from sensor_msgs.msg import CompressedImage
 
-from ...configs.lane_config import LaneConfig
-from ...utils.image_utils import to_roi, to_bev, color_filter, get_hough_image
+from src.configs.lane_config import LaneConfig
+from src.utils.image_utils import to_roi, to_bev, color_filter, get_hough_image
 
 
 class LaneDetector:

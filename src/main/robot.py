@@ -9,13 +9,13 @@ import rospy
 import time
 import numpy as np
 
-from ..core.detection.lane_detector import LaneDetector
-from ..core.detection.fire_detector import FireDetector
-from ..core.detection.aruco_trigger import ArucoTrigger
-from ..core.control.pid_controller import PIDController
-from ..core.control.controller import Controller
+from src.core.detection.lane_detector import LaneDetector
+from src.core.detection.fire_detector import FireDetector
+from src.core.detection.aruco_trigger import ArucoTrigger
+from src.core.control.pid_controller import PIDController
+from src.core.control.controller import Controller
 
-from ..configs.lane_config import LaneConfig
+from src.configs.lane_config import LaneConfig
 
 class Robot:
     """
