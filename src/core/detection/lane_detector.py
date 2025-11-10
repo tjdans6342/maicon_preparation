@@ -111,7 +111,7 @@ class LaneDetector:
         h, w = hough_img.shape[:2]
 
         nwindows = self.cfg.nwindows
-        margin = self.cfg.margin
+        margin = self.cfg.width // 2
         window_height = int(h / nwindows)
 
         # ---------- (1) 슬라이딩 윈도우 박스 시각화 ----------
@@ -164,7 +164,7 @@ class LaneDetector:
                 → cv2.Canny() 
                 → get_hough_image()
         """
-        bev_img = to_bev(
+        bev_img, _ = to_bev(
             image,
             top=self.cfg.roi_top,
             bottom=self.cfg.roi_bottom,
@@ -174,14 +174,14 @@ class LaneDetector:
         filtered_img = color_filter(bev_img, hls_range=self.cfg.hls)
         gray_img = cv2.cvtColor(filtered_img, cv2.COLOR_BGR2GRAY)
         blur_img = cv2.GaussianBlur(gray_img, (7, 7), 5)
-        _, binary_img = cv2.threshold(blur_img, *self.cfg.binary_threshold, cv2.THRESH_BINARY)
+        _, binary_img = cv2.threshold(blur_img, self.cfg.binary_threshold[0], self.cfg.binary_threshold[1], cv2.THRESH_BINARY)
         canny_img = cv2.Canny(binary_img, 10, 100)
         hough_img = get_hough_image(canny_img)
 
         # _lane_detection()으로 중심선 계산
         result = self._lane_detection(
             hough_img, 
-            mwindows=self.cfg.nwindows, 
+            nwindows=self.cfg.nwindows, 
             width=self.cfg.width, 
             minpix=self.cfg.minpix
         )
@@ -199,7 +199,7 @@ class LaneDetector:
             image_dict = {
                 "Original": image,
                 "BEV": bev_img,
-                "Color filter": filtered_img,
+                "Filtered": filtered_img,
                 "gray": gray_img,
                 "Blurred": blur_img,
                 "binary": binary_img,
@@ -216,6 +216,8 @@ class LaneDetector:
             ]
 
             display_names = self.cfg.image_names
+
+            print(display_names)
 
             for i, name in enumerate(display_names):
                 cv2.namedWindow(name)

@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 import cv2
 import numpy as np
 import os
@@ -5,10 +8,10 @@ import matplotlib.pyplot as plt
 import math
 
 def to_roi(
-    image: np.ndarray,
-    vertices: np.ndarray,
-    normalized: bool = True
-) -> np.ndarray:
+    image, #: np.ndarray,
+    vertices, # np.ndarray,
+    normalized=True, # bool = True
+): # -> np.ndarray:
     """
     Extract and return only the polygonal region of interest (ROI) defined by given vertices.
     (Supports both absolute pixel coordinates and normalized ratio coordinates.)
@@ -55,12 +58,12 @@ def to_roi(
 
 def to_bev(
     image,
-    top: float = 0.7,
-    bottom: float = 0.0,
-    margin: float = 0.2,
+    top=0.7, #: float = 0.7,
+    bottom=0.0, #: float = 0.0,
+    margin=0.2, #: float = 0.2,
     dst_size=None,
-    normalized: bool = True
-) -> tuple[np.ndarray, np.ndarray]:
+    normalized=True #: bool = True
+): # -> tuple[np.ndarray, np.ndarray]:
     """
     Perform Bird’s Eye View (BEV) perspective transform based on proportional or pixel-based region settings.
 
@@ -133,7 +136,8 @@ def to_bev(
     return bev_img, Minv
 
 
-def color_filter(image: np.ndarray, hls_range: list, inverse: bool = False) -> np.ndarray:
+# def color_filter(image: np.ndarray, hls_range: list, inverse: bool = False) -> np.ndarray:
+def color_filter(image, hls_range, inverse=False):
     """
     Apply HLS-based color filtering on the input image with optional inversion.
 

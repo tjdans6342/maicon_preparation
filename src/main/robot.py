@@ -3,6 +3,7 @@
 
 DARK_HLS = [[0, 0, 0], [180, 140, 200]] # 기존에 했던 값
 WHITE_HLS = [(0, 160, 0), (180, 255, 255)] # whilte line
+WHITE_HLS = [(0, 120, 0), (180, 255, 255)] # whilte line_pm2139
 YELLOW_HLS = [(20, 70, 12), (40, 130, 110)] # yellow line
 
 import rospy
@@ -35,7 +36,7 @@ class Robot:
             # bev_normalized = False,
             roi_top = 0.75,
             roi_bottom = 0.0,
-            roi_width = 0.1,
+            roi_margin = 0.1,
 
             hls=[WHITE_HLS],
             binary_threshold=(20, 255),
@@ -44,8 +45,9 @@ class Robot:
             width=150,
             minpix=15,
 
-            display_mode=False,
-            image_names=["Original", "BEV", "Filtered"]
+            display_mode=True,
+            image_names=["Original", "BEV", "Filtered", "Lane Detection"]
+            # "Original", "BEV", "Filtered":, "gray", "Blurred", "binary", "Canny", "Hough", "Lane Detection"
         )
         self.lane = LaneDetector(image_topic="/usb_cam/image_raw/compressed", config=cfg)
 

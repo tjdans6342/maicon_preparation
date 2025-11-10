@@ -26,20 +26,20 @@ class LaneConfig:
         self.image_names = ["Original", "BEV", "Filtered", "Canny", "Hough"]
 
         # --- ROI / BEV 설정 ---
-        self.bev_normalized = False
+        self.bev_normalized = True
         self.roi_top = 0.75
         self.roi_bottom = 0.0
-        self.roi_width = 0.1
+        self.roi_margin = 0.1
 
         # --- 색상 필터 (HLS 범위) ---
-        self.hls = [(0, 160, 0), (180, 255, 255)] # default: white line
+        self.hls = [[(0, 160, 0), (180, 255, 255)]] # default: white line
 
         # --- 이미지 전처리 ---
         self.binary_threshold = (20, 255)
 
         # --- Sliding Window 설정 ---
         self.nwindows = 15
-        self.width = 150
+        self.width = 100
         self.minpix = 15
 
         # --- YAML 파일이 주어졌다면 override ---
@@ -58,7 +58,7 @@ class LaneConfig:
             if hasattr(self, key):
                 setattr(self, key, value)
             else:
-                print(f"[LaneConfig] ⚠️ Unknown key ignored: {key}")
+                print("[LaneConfig] ⚠️ Unknown key ignored: {}".format(key))
 
     # -------------------------------------------------------
     #  YAML 파일 로드
@@ -71,7 +71,7 @@ class LaneConfig:
             if hasattr(self, key):
                 setattr(self, key, value)
             else:
-                print(f"[LaneConfig] ⚠️ Unknown key ignored: {key}")
+                print("[LaneConfig] ⚠️ Unknown key ignored: {}".format(key))
 
     # -------------------------------------------------------
     #  YAML로 저장 (선택)
@@ -83,4 +83,4 @@ class LaneConfig:
         }
         with open(yaml_path, "w") as f:
             yaml.safe_dump(cfg_dict, f, allow_unicode=True)
-        print(f"[LaneConfig] Saved to {yaml_path}")
+        print("[LaneConfig] Saved to {}".format(yaml_path))
