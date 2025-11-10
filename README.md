@@ -13,24 +13,27 @@
 
 ```
 src/
-├── core/
+├── configs/                       # 환경 설정(Configuration) 관련 파일
+│   └── lane_config.py             # 차선 인식 관련 파라미터 및 설정 값
+│
+├── core/                          # 핵심 로직(Core Logic) 계층
 │   ├── detection/                 # 감지(Detection) 계열 모듈
-│   │   ├── lane_detector.py       # 차선 인식
-│   │   ├── fire_detector.py       # 화재 감지
+│   │   ├── lane_detector.py       # 차선 인식 모듈
+│   │   ├── fire_detector.py       # 화재 감지 모듈
 │   │   └── aruco_trigger.py       # ArUco 마커 감지 및 이벤트 트리거
 │   │
-│   ├── control/                   # 제어(Control) 계열 모듈
-│       ├── controller.py          # 전체 로봇 제어 흐름 통합 (mode 전환, 상태 관리)
+│   └── control/                   # 제어(Control) 계열 모듈
+│       ├── controller.py          # 전체 로봇 제어 흐름 및 상태 관리
 │       └── pid_controller.py      # PID 제어 알고리즘
-│   
 │
-├── main/                          # 시스템 전체 실행 진입점
-│   └── robot.py                   # 전체 로봇 시스템을 통합 실행하는 Main Entry
+├── main/                          # 시스템 실행 진입점 (Main Entry)
+│   └── robot.py                   # 전체 로봇 시스템을 통합 실행하는 메인 루프
 │
-├── utils/                         # 공통 유틸리티 함수
+├── utils/                         # 공통 유틸리티 모듈
 │   └── image_utils.py             # 이미지 전처리 및 보조 함수
 │
-└── README.md
+├── .gitignore                     # Git 추적 제외 규칙
+└── README.md                      # 프로젝트 설명 문서
 
 ```
 

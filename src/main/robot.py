@@ -1,16 +1,22 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+DARK_HLS = [[0, 0, 0], [180, 140, 200]] # 기존에 했던 값
+WHITE_HLS = [(0, 160, 0), (180, 255, 255)] # whilte line
+WHITE_HLS = [(0, 120, 0), (180, 255, 255)] # whilte line_pm2139
+YELLOW_HLS = [(20, 70, 12), (40, 130, 110)] # yellow line
+
 import rospy
 import time
 import numpy as np
 
-from ..core.detection.lane_detector import LaneDetector
-from ..core.detection.fire_detector import FireDetector
-from ..core.detection.aruco_trigger import ArucoTrigger
-from ..core.control.pid_controller import PIDController
-from ..core.control.controller import Controller
+from src.core.detection.lane_detector import LaneDetector
+from src.core.detection.fire_detector import FireDetector
+from src.core.detection.aruco_trigger import ArucoTrigger
+from src.core.control.pid_controller import PIDController
+from src.core.control.controller import Controller
 
+from src.configs.lane_config import LaneConfig
 
 class Robot:
     """
@@ -25,7 +31,26 @@ class Robot:
         rospy.loginfo("🤖 Robot system initializing...")
 
         # --- 서브 모듈 초기화 ---
-        self.lane = LaneDetector(image_topic="/usb_cam/image_raw/compressed")
+        cfg = LaneConfig()
+        cfg.update( # LaneDetector 설정값 오버라이드
+            # bev_normalized = False,
+            roi_top = 0.75,
+            roi_bottom = 0.0,
+            roi_margin = 0.1,
+
+            hls=[WHITE_HLS],
+            binary_threshold=(20, 255),
+
+            nwindows=15,
+            width=150,
+            minpix=15,
+
+            display_mode=True,
+            image_names=["Original", "BEV", "Filtered", "Lane Detection"]
+            # "Original", "BEV", "Filtered":, "gray", "Blurred", "binary", "Canny", "Hough", "Lane Detection"
+        )
+        self.lane = LaneDetector(image_topic="/usb_cam/image_raw/compressed", config=cfg)
+
         self.aruco = ArucoTrigger(cmd_topic="/cmd_vel")
         self.controller = Controller("/cmd_vel")
         self.pid = PIDController(kp=0.65, ki=0.001, kd=0.01, integral_limit=2.0)

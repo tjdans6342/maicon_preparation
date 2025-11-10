@@ -1,15 +1,19 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+
 import cv2
 import numpy as np
 import rospy
 from cv_bridge import CvBridge
 from sensor_msgs.msg import CompressedImage
 
+from src.configs.lane_config import LaneConfig
+from src.utils.image_utils import to_roi, to_bev, color_filter, get_hough_image
+
 
 class LaneDetector:
-    def __init__(self, image_topic="/usb_cam/image_raw/compressed"):
+    def __init__(self, image_topic="/usb_cam/image_raw/compressed", config=None):
         """
         LaneDetector 클래스
         - 이미지 구독 및 차선 인식 (BEV 변환 + Hough + Sliding Window)
@@ -17,6 +21,9 @@ class LaneDetector:
         """
         self.bridge = CvBridge()
         self.image = None
+
+        # Config 로드 (yaml_path 없으면 기본값 사용)
+        self.cfg = config or LaneConfig()  # 없으면 기본 config 로드
 
         # ROS 구독자 등록
         rospy.Subscriber(
@@ -27,6 +34,10 @@ class LaneDetector:
             tcp_nodelay=True
         )
 
+        self.config = {
+
+        }
+
         rospy.loginfo("📷 LaneDetector subscribed to {}".format(image_topic))
 
     # -------------------------------------------------------
@@ -36,61 +47,19 @@ class LaneDetector:
         self.image = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding="bgr8")
 
     # -------------------------------------------------------
-    #  BEV 변환 (Bird’s Eye View)
-    # -------------------------------------------------------
-    def _warp_bev(self, image):
-        src = np.float32([[40, 100], [0, 480], [600, 100], [640, 480]])
-        dst = np.float32([[0, 0], [0, 480], [480, 0], [480, 480]])
-        M = cv2.getPerspectiveTransform(src, dst)
-        bev = cv2.warpPerspective(image, M, (480, 480))
-        return bev
-
-    # -------------------------------------------------------
-    #  색상 필터 (HLS 기반 흰색/노란색 강조)
-    # -------------------------------------------------------
-    def _color_filter(self, image):
-        hls = cv2.cvtColor(image, cv2.COLOR_BGR2HLS)
-        black_lower = np.array([0, 0, 0])
-        black_upper = np.array([180, 140, 200])
-        mask = cv2.inRange(hls, black_lower, black_upper)
-        return cv2.bitwise_and(image, image, mask=mask)
-
-    # -------------------------------------------------------
-    #  Hough 변환 (차선 후보 추출)
-    # -------------------------------------------------------
-    def _hough_transform(self, binary):
-        lines = cv2.HoughLines(binary, 1, np.pi / 180, 80)
-        h, w = binary.shape
-        out = np.zeros((h, w), dtype=np.uint8)
-
-        if lines is not None:
-            for line in lines:
-                rho, theta = line[0]
-                a, b = np.cos(theta), np.sin(theta)
-                x0, y0 = a * rho, b * rho
-                x1, y1 = int(x0 + 1000 * (-b)), int(y0 + 1000 * a)
-                x2, y2 = int(x0 - 1000 * (-b)), int(y0 - 1000 * a)
-
-                slope_deg = 90 - np.degrees(np.arctan2(b, a))
-                if abs(slope_deg) < 10 or abs(slope_deg - 180) < 10:
-                    cv2.line(out, (x1, y1), (x2, y2), 100, 5)
-                else:
-                    cv2.line(out, (x1, y1), (x2, y2), 255, 2)
-        return out
-
-    # -------------------------------------------------------
     #  Sliding Window로 중심선 탐지
     # -------------------------------------------------------
-    def _sliding_window_center(self, binary):
-        h, w = binary.shape
-        histogram = np.sum(binary[h // 2:, :], axis=0)
+    def _lane_detection(self, hough, nwindows, width, minpix):
+        h, w = hough.shape
+        histogram = np.sum(hough[h // 2:, :], axis=0)
         midx = np.argmax(histogram)
-        nwindows = 15
-        margin = 150
-        minpix = 15
+
+        if width < 1.0:
+            width = np.int(w * width)
+        margin = width // 2
 
         window_height = h // nwindows
-        nz = binary.nonzero()
+        nz = hough.nonzero()
         mid_lane_inds = []
         x_list, y_list = [], []
 
@@ -118,11 +87,58 @@ class LaneDetector:
             return None
 
         fit = np.polyfit(y_list, x_list, 2)
+
         center_x_bottom = np.polyval(fit, h)
         distance = (w / 2) - center_x_bottom # 왼쪽이 +, 오른쪽이 -
-        offset = distance / (w / 2) # 0.0 ~ ±1.0 로 정규화
+        offset = distance / (w / 2) # 0.0 ~ ±1.0 으로 정규화
         heading = np.arctan(fit[1])  # 기울기 근사
-        return {"heading": heading, "offset": offset}
+
+        return {
+            "heading": heading, "offset": offset,
+            "fit": fit, "x": x_list, "y": y_list,
+            "mid_avg": np.mean(x_list)
+        }
+
+    # -------------------------------------------------------
+    #  시각화 함수
+    # -------------------------------------------------------
+    def _visualize_lane_detection(self, hough_img, x, y, fit, mid_avg, nwindows):
+        """
+        시각화 + 설명 출력 함수
+        - _lane_detection()의 결과를 이용해 차선 검출 과정을 시각화.
+        """
+        vis = cv2.cvtColor(hough_img, cv2.COLOR_GRAY2BGR)
+        h, w = hough_img.shape[:2]
+
+        nwindows = self.cfg.nwindows
+        margin = self.cfg.width // 2
+        window_height = int(h / nwindows)
+
+        # ---------- (1) 슬라이딩 윈도우 박스 시각화 ----------
+        for cx, cy in zip(x, y):
+            win_yl = int(cy - window_height / 2)
+            win_yh = int(cy + window_height / 2)
+            win_xl = int(cx - margin)
+            win_xh = int(cx + margin)
+            cv2.rectangle(vis, (win_xl, win_yl), (win_xh, win_yh), (0, 255, 0), 2)
+
+        # ---------- (2) 중심점 표시 ----------
+        for cx, cy in zip(x, y):
+            cv2.circle(vis, (int(cx), int(cy)), 6, (255, 0, 0), -1)
+
+        # ---------- (3) 2차 곡선 시각화 ----------
+        y_plot = np.linspace(0, h - 1, h)
+        x_fit = fit[0] * y_plot ** 2 + fit[1] * y_plot + fit[2]
+        for i in range(1, len(y_plot)):
+            cv2.line(vis,
+                    (int(x_fit[i - 1]), int(y_plot[i - 1])),
+                    (int(x_fit[i]), int(y_plot[i])),
+                    (0, 255, 255), 3)
+
+        # ---------- (4) 평균 중심선 시각화 ----------
+        cv2.line(vis, (int(mid_avg), 0), (int(mid_avg), h), (255, 100, 255), 2)
+
+        return vis
 
     # -------------------------------------------------------
     #  최종 detect() — 외부에서 호출되는 메인 함수
@@ -137,55 +153,79 @@ class LaneDetector:
         if image is None:
             return None
 
-        # 1️⃣ 전처리: BEV + Blur + 색상 필터
-        bev = self._warp_bev(image)
-        blur = cv2.GaussianBlur(bev, (7, 7), 5)
-        filtered = self._color_filter(blur)
+        """
+            Pipeline: 
+                Original 
+                → (ROI) → BEV 
+                → color_filter() 
+                → Gray Scale: cv2.cvtColor()
+                → cv2.GaussianBlur() 
+                → cv2.thresholds() 
+                → cv2.Canny() 
+                → get_hough_image()
+        """
+        bev_img, _ = to_bev(
+            image,
+            top=self.cfg.roi_top,
+            bottom=self.cfg.roi_bottom,
+            margin=self.cfg.roi_margin,
+            normalized=self.cfg.bev_normalized
+        )
+        filtered_img = color_filter(bev_img, hls_range=self.cfg.hls)
+        gray_img = cv2.cvtColor(filtered_img, cv2.COLOR_BGR2GRAY)
+        blur_img = cv2.GaussianBlur(gray_img, (7, 7), 5)
+        _, binary_img = cv2.threshold(blur_img, self.cfg.binary_threshold[0], self.cfg.binary_threshold[1], cv2.THRESH_BINARY)
+        canny_img = cv2.Canny(binary_img, 10, 100)
+        hough_img = get_hough_image(canny_img)
 
-        # 2️⃣ 이진화 + canny + Hough
-        gray = cv2.cvtColor(filtered, cv2.COLOR_BGR2GRAY)
-        _, binary = cv2.threshold(gray, 20, 255, cv2.THRESH_BINARY)
-        canny = cv2.Canny(binary, 10, 100)
-        hough_img = self._hough_transform(canny)
+        # _lane_detection()으로 중심선 계산
+        result = self._lane_detection(
+            hough_img, 
+            nwindows=self.cfg.nwindows, 
+            width=self.cfg.width, 
+            minpix=self.cfg.minpix
+        )
 
+        if self.cfg.display_mode:
+            lane_detected_img = self._visualize_lane_detection(
+                hough_img,
+                x=result["x"] if result else [],
+                y=result["y"] if result else [],
+                fit=result["fit"] if result else [0,0,0],
+                mid_avg=result["mid_avg"] if result else 0,
+                nwindows=self.cfg.nwindows
+            )
 
-        cv2.namedWindow('Original')
-        cv2.moveWindow('Original', 0, 0)
-        cv2.imshow('Original', image)
+            image_dict = {
+                "Original": image,
+                "BEV": bev_img,
+                "Filtered": filtered_img,
+                "gray": gray_img,
+                "Blurred": blur_img,
+                "binary": binary_img,
+                "Canny": canny_img,
+                "Hough": hough_img,
+                "Lane Detection": lane_detected_img
+            }
 
-        cv2.namedWindow('BEV')
-        cv2.moveWindow('BEV', 800, 0)
-        cv2.imshow('BEV', bev)
+            window_pos = [
+                (0, 0), (600, 0), (1200, 0),
+                (0, 600), (600, 600), (1200, 600),
+                (0, 0), (600, 0), (1200, 0),
+                (0, 600), (600, 600), (1200, 600)
+            ]
+
+            display_names = self.cfg.image_names
+
+            print(display_names)
+
+            for i, name in enumerate(display_names):
+                cv2.namedWindow(name)
+                cv2.moveWindow(name, window_pos[i][0], window_pos[i][1])
+                cv2.imshow(name, image_dict[name])
+
+            cv2.waitKey(1)
         
-        cv2.namedWindow('Blurred')
-        cv2.moveWindow('Blurred', 1300, 0)
-        cv2.imshow('Blurred', blur)
-        
-        cv2.namedWindow('Color filter')
-        cv2.moveWindow('Color filter', 0, 500)
-        # cv2.circle(filtered, (240,240), 2, (255,255,255), thickness=-1)
-        cv2.imshow('Color filter', filtered)
-        
-        cv2.namedWindow('binary')
-        cv2.moveWindow('binary', 500, 500)
-        cv2.imshow('binary', binary)
-
-        cv2.namedWindow('Canny')
-        cv2.moveWindow('Canny', 1000, 500)
-        cv2.imshow('Canny', canny)
-
-        cv2.namedWindow('Hough')
-        cv2.moveWindow('Hough', 1500, 500)
-        cv2.imshow('Hough', hough_img)
-
-        # cv2.namedWindow('Sliding Window')
-        # cv2.moveWindow('Sliding Window', 1400, 0)
-        # cv2.imshow("Sliding Window", out_img)
-
-        cv2.waitKey(1)
-
-        # 3️⃣ Sliding window로 중심선 계산
-        result = self._sliding_window_center(hough_img)
         return result
 
 
