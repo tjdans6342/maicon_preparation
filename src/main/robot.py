@@ -2,9 +2,15 @@
 # -*- coding: utf-8 -*-
 
 DARK_HLS = [[0, 0, 0], [180, 140, 200]] # 기존에 했던 값
-WHITE_HLS = [(0, 160, 0), (180, 255, 255)] # whilte line
-WHITE_HLS = [(0, 120, 0), (180, 255, 255)] # whilte line_pm2139
+
+# WHITE_HLS = [(0, 160, 0), (180, 255, 255)] # whilte line_1007
+# WHITE_HLS = [(0, 150, 0), (180, 255, 255)] # whilte line 1121
+WHITE_HLS = [(0, 160, 0), (180, 255, 255)] # whilte line 1213
+# WHITE_HLS = [(0, 120, 0), (180, 255, 255)] # whilte line 2139
+
 YELLOW_HLS = [(20, 70, 12), (40, 130, 110)] # yellow line
+
+
 
 import rospy
 import time
@@ -18,17 +24,21 @@ from src.core.control.controller import Controller
 
 from src.configs.lane_config import LaneConfig
 
+    <<<<<<< HEAD
 
 
-#### video recoding
+    #### video recoding
 
-from src.configs.video_config import VideoConfig
-from src.core.recording.video_recorder import VideoRecorder
+    from src.configs.video_config import VideoConfig
+    from src.core.recording.video_recorder import VideoRecorder
 
-########
+    ########
 
 
 
+    =======
+    from collections import deque
+    >>>>>>> 01b9e2eb03a7082bf2780bc0fe1341f769d58605
 
 class Robot:
     """
@@ -42,7 +52,7 @@ class Robot:
         rospy.init_node("robot_main_node", anonymous=False)
         rospy.loginfo("🤖 Robot system initializing...")
 
-        # --- 서브 모듈 초기화 ---
+        # LaneDetector 설정값
         cfg = LaneConfig()
         cfg.update( # LaneDetector 설정값 오버라이드
             # bev_normalized = False,
@@ -57,22 +67,45 @@ class Robot:
             width=150,
             minpix=15,
 
+            slope_threshold=10,
+            min_votes=50, #60,
+
             display_mode=True,
-            image_names=["Original", "BEV", "Filtered", "Lane Detection"]
+            image_names=["Original", "BEV", "Filtered", "Canny", "Hough", "Lane Detection"]
             # "Original", "BEV", "Filtered":, "gray", "Blurred", "binary", "Canny", "Hough", "Lane Detection"
         )
-        self.lane = LaneDetector(image_topic="/usb_cam/image_raw/compressed", config=cfg)
+        
+        # Control 설정값
+        self.control_configs = {
+            # linear
+            'default-setting': [0.05, 1.2, 1.0],
+            'basic:linear0.10': [0.1 * 1.0, 0.7 * 1.0, 0.7 * 1.0], 
+            'basic:linear0.15': [0.1 * 1.5, 0.7 * 1.5, 0.7 * 1.5],
+            'basic:linear0.20': [0.1 * 2.0, 0.7 * 2.0, 0.7 * 2.0],
+            'basic:linear0.30': [0.1 * 3.0, 0.7 * 3.0, 0.7 * 3.0],
 
+            # curved
+            'basic:curved0.10': [0.1 * 1.0, 0.7 * 1.0, 0.7 * 1.0], # same 'basic:linear0.10'
+        }
+
+        self.heading_error_queue_size = 5 # can be tuned
+        self.heading_error_queue = deque([0] * self.heading_error_queue_size)
+        self.linear_option = self.control_configs['basic:linear0.30'] # can be tuned
+        self.curved_option = self.control_configs['basic:curved0.10'] # can be tuned
+
+        self.base_speed, self.lat_weight, self.heading_weight = self.linear_option
+
+        self.lane = LaneDetector(image_topic="/usb_cam/image_raw/compressed", config=cfg, heading_error_queue=self.heading_error_queue)
+
+        # ArucoTrigger 초기화 & Controller 초기화 & PIDController 초기화
         self.aruco = ArucoTrigger(cmd_topic="/cmd_vel")
         self.controller = Controller("/cmd_vel")
         self.pid = PIDController(kp=0.65, ki=0.001, kd=0.01, integral_limit=2.0)
         # self.fire = FireDetector(topic_name="/fire_cam/image_raw/compressed")
 
-        # --- 상태 변수 ---
-        self.mode = "LANE_FOLLOW"
-        self.base_speed = 0.05
-        self.lat_weight = 1.2
-        self.heading_weight = 1.0
+
+        self.mode = "LANE_FOLLOW"  # 초기 모드 설정
+
         self.last_switch_time = rospy.get_time()
 
         rospy.loginfo("Starting main control loop...")
@@ -97,13 +130,26 @@ class Robot:
     # -------------------------------------------------------
     def _lane_follow(self):
         lane_info = self.lane.detect()
-        if lane_info is None:
+        if lane_info is None or (lane_info["heading"] == 0.0 and lane_info["offset"] == 0.0):
             rospy.logwarn_throttle(1.0, "[Lane] No lane detected.")
             self.controller.stop()
             return
 
         heading_err = lane_info["heading"]
         lateral_err = lane_info["offset"]
+
+        # change mode (linear ↔ curved)
+        is_curved = False
+        for he in self.heading_error_queue:
+            is_curved = is_curved or (abs(he) > 0.5)
+        
+        if is_curved: # curved mode
+            print("Passing Curved line!!")
+            self.base_speed, self.lat_weight, self.heading_weight = self.curved_option
+        else: # linear mode
+            self.base_speed, self.lat_weight, self.heading_weight= self.linear_option            
+
+        print("total_heading:", self.heading_weight * heading_err, "total_later:", self.lat_weight * lateral_err)
 
         # 종합 오차
         combined_err = (self.lat_weight * lateral_err) + (self.heading_weight * heading_err)
@@ -115,7 +161,7 @@ class Robot:
         # 주행 명령 퍼블리시
         self.controller.publish(linear=self.base_speed, angular=control)
 
-        print("angle(rad): ", heading_err, "lat_norm: ", lateral_err)
+        print("heading_err: ", heading_err, "lateral_err: ", lateral_err)
         print("cmd_ang: ", control)
 
         self.aruco.step()  # 아루코 액션 중이면 계속 실행
@@ -150,7 +196,8 @@ class Robot:
         if self.mode == "LANE_FOLLOW":
             frame = self.lane.image
             if frame is not None:
-                self.aruco.observe_and_maybe_trigger(frame)
+                pass
+                # self.aruco.observe_and_maybe_trigger(frame)
 
         # --- 아루코 상태 확인 ---
         if self.aruco.mode == "EXECUTE_ACTION":

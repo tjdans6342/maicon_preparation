@@ -37,6 +37,10 @@ class LaneConfig:
         # --- 이미지 전처리 ---
         self.binary_threshold = (20, 255)
 
+        # --- Hough lines ---
+        self.slope_threshold = 10
+        self.min_votes = 100
+
         # --- Sliding Window 설정 ---
         self.nwindows = 15
         self.width = 100
