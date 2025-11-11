@@ -10,7 +10,7 @@ Simple Video Recorder with Threading
 import cv2
 import rospy
 import threading
-import queue
+import Queue as queue
 import os
 from datetime import datetime
 
@@ -69,8 +69,8 @@ class VideoRecorder:
         # Start recording thread
         self.recording_thread = threading.Thread(
             target=self._recording_loop,
-            daemon=True
         )
+        self.recording_thread.daemon = True
         self.recording_thread.start()
         
         self.is_recording_flag = True

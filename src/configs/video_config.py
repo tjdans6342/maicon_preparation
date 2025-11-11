@@ -15,10 +15,10 @@ class VideoConfig:
         self.enabled = True
         
         # Output directory for videos
-        self.output_dir = os.path.expanduser("~/robot_videos")
+        self.output_dir = os.path.expanduser("/media/r1mini/MAICON/sungmoon/robot_videos")
         
         # Video settings
-        self.fps = 20  # Frames per second
+        self.fps = 15  # Frames per second
         self.codec = "XVID"  # Video codec (XVID, mp4v, MJPG)
         self.resolution = None  # None = keep original size
         

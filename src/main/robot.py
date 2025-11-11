@@ -66,7 +66,7 @@ class Robot:
             width=150,
             minpix=15,
 
-            slope_threshold=10,
+            slope_threshold=20,
             min_votes=50, #60,
 
             display_mode=True,
@@ -89,7 +89,7 @@ class Robot:
 
         self.heading_error_queue_size = 5 # can be tuned
         self.heading_error_queue = deque([0] * self.heading_error_queue_size)
-        self.linear_option = self.control_configs['basic:linear0.30'] # can be tuned
+        self.linear_option = self.control_configs['basic:linear0.20'] # can be tuned
         self.curved_option = self.control_configs['basic:curved0.10'] # can be tuned
 
         self.base_speed, self.lat_weight, self.heading_weight = self.linear_option
