@@ -207,6 +207,8 @@ class ArucoTrigger:
         pending_actions를 순서대로 수행.
         모두 끝나면 True 반환 (Robot이 LANE 모드로 복귀함)
         """
+    
+
         if self.mode != "EXECUTE_ACTION": # 실행 중 아님
             return True  
 

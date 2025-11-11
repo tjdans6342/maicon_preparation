@@ -11,9 +11,10 @@ from sensor_msgs.msg import CompressedImage
 from src.configs.lane_config import LaneConfig
 from src.utils.image_utils import to_roi, to_bev, color_filter, get_hough_image
 
+from collections import deque
 
 class LaneDetector:
-    def __init__(self, image_topic="/usb_cam/image_raw/compressed", config=None):
+    def __init__(self, image_topic="/usb_cam/image_raw/compressed", config=None, heading_error_queue=None):
         """
         LaneDetector 클래스
         - 이미지 구독 및 차선 인식 (BEV 변환 + Hough + Sliding Window)
@@ -21,7 +22,6 @@ class LaneDetector:
         """
         self.bridge = CvBridge()
         self.image = None
-
         # Config 로드 (yaml_path 없으면 기본값 사용)
         self.cfg = config or LaneConfig()  # 없으면 기본 config 로드
 
@@ -34,9 +34,10 @@ class LaneDetector:
             tcp_nodelay=True
         )
 
-        self.config = {
-
-        }
+        if heading_error_queue == None:
+            self.heading_error_queue = deque([0] * 10)
+        else:
+            self.heading_error_queue = heading_error_queue
 
         rospy.loginfo("📷 LaneDetector subscribed to {}".format(image_topic))
 
@@ -92,6 +93,14 @@ class LaneDetector:
         distance = (w / 2) - center_x_bottom # 왼쪽이 +, 오른쪽이 -
         offset = distance / (w / 2) # 0.0 ~ ±1.0 으로 정규화
         heading = np.arctan(fit[1])  # 기울기 근사
+
+        if center_x_bottom == 0:
+            offset = 0
+        
+        print("center_x_bottom:", center_x_bottom, "offset:", offset)
+
+        self.heading_error_queue.popleft()
+        self.heading_error_queue.append(heading)
 
         return {
             "heading": heading, "offset": offset,
@@ -176,7 +185,11 @@ class LaneDetector:
         blur_img = cv2.GaussianBlur(gray_img, (7, 7), 5)
         _, binary_img = cv2.threshold(blur_img, self.cfg.binary_threshold[0], self.cfg.binary_threshold[1], cv2.THRESH_BINARY)
         canny_img = cv2.Canny(binary_img, 10, 100)
-        hough_img = get_hough_image(canny_img)
+        hough_img = get_hough_image(
+            canny_img,
+            slope_threshold=self.cfg.slope_threshold, 
+            min_votes=self.cfg.min_votes
+        )
 
         # _lane_detection()으로 중심선 계산
         result = self._lane_detection(
