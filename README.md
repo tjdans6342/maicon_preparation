@@ -30,7 +30,8 @@ src/
 │   └── robot.py                   # 전체 로봇 시스템을 통합 실행하는 메인 루프
 │
 ├── utils/                         # 공통 유틸리티 모듈
-│   └── image_utils.py             # 이미지 전처리 및 보조 함수
+│   ├── image_utils.py             # 이미지 전처리 및 보조 함수
+│   └── drone_utils.ipynb          # 드론용 함수(파일 저장)
 │
 ├── .gitignore                     # Git 추적 제외 규칙
 └── README.md                      # 프로젝트 설명 문서
