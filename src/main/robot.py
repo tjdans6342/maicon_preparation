@@ -18,9 +18,11 @@ import numpy as np
 
 from src.core.detection.lane_detector import LaneDetector
 from src.core.detection.fire_detector import FireDetector
-from src.core.detection.aruco_trigger import ArucoTrigger
+# from src.core.detection.aruco_trigger import ArucoTrigger
+from src.core.detection.aruco_trigger_capture_yolo import ArucoTrigger
 from src.core.control.pid_controller import PIDController
 from src.core.control.controller import Controller
+
 
 from src.configs.lane_config import LaneConfig
 
@@ -136,7 +138,7 @@ class Robot:
         print("heading_err: ", heading_err, "lateral_err: ", lateral_err)
         print("cmd_ang: ", control)
 
-        self.aruco.step()  # 아루코 액션 중이면 계속 실행
+        self.aruco.step()  # 아루코 액션 중이면 계속 실행 (이거 사실 필요 없을 거 같은데..)
 
     # -------------------------------------------------------
     #  화재 감지 모드
