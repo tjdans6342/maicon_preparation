@@ -18,6 +18,18 @@ from src.core.control.controller import Controller
 
 from src.configs.lane_config import LaneConfig
 
+
+
+#### video recoding
+
+from src.configs.video_config import VideoConfig
+from src.core.recording.video_recorder import VideoRecorder
+
+########
+
+
+
+
 class Robot:
     """
     ✅ Robot Main Controller
@@ -63,8 +75,22 @@ class Robot:
         self.heading_weight = 1.0
         self.last_switch_time = rospy.get_time()
 
-        rospy.loginfo("✅ All subsystems initialized.")
         rospy.loginfo("Starting main control loop...")
+
+
+        ### video recoding
+
+            # Video Recording Module
+
+        video_cfg = VideoConfig()
+        self.video_recorder = VideoRecorder(config=video_cfg)
+        
+        # Start recording
+        self.video_recorder.start_recording()
+        
+        rospy.loginfo("✅ All subsystems initialized.")
+
+
 
     # -------------------------------------------------------
     #  차선 기반 주행 모드
@@ -93,6 +119,13 @@ class Robot:
         print("cmd_ang: ", control)
 
         self.aruco.step()  # 아루코 액션 중이면 계속 실행
+
+
+            # Add frame to video recorder
+
+        if self.lane.image is not None:
+            self.video_recorder.add_frame(self.lane.image)
+
 
     # -------------------------------------------------------
     #  화재 감지 모드
@@ -139,6 +172,11 @@ class Robot:
     # -------------------------------------------------------
     def run(self):
         rate = rospy.Rate(20)
+
+        #Register cleanup callback
+        
+        rospy.on_shutdown(self._cleanup)
+
         while not rospy.is_shutdown():
             self._check_mode_transition()
 
@@ -149,6 +187,12 @@ class Robot:
                 # ArucoTrigger 내부에서 step()이 액션 실행 중임
                 self.aruco.step()
 
+
+                # send video 
+
+                if self.lane.image is not None:
+                    self.video_recorder.add_frame(self.lane.image)
+
                 # 모두 끝나면 ArucoTrigger가 자동으로 LANE_FOLLOW 복귀
                 if self.aruco.mode == "LANE_FOLLOW":
                     self.mode = "LANE_FOLLOW"
@@ -158,6 +202,26 @@ class Robot:
             #     self._fire_mode()
 
             rate.sleep()
+
+    def _cleanup(self):
+        """
+        Cleanup resources on ROS shutdown
+        - Stop video recording
+        - Stop robot movement
+        """
+        rospy.loginfo("🛑 Robot shutting down...")
+        
+        # Stop video recording properly
+        if hasattr(self, 'video_recorder') and self.video_recorder.is_recording():
+            rospy.loginfo("[Cleanup] Stopping video recorder...")
+            self.video_recorder.stop_recording()
+        
+        # Stop robot movement
+        if hasattr(self, 'controller'):
+            rospy.loginfo("[Cleanup] Stopping robot...")
+            self.controller.stop()
+        
+        rospy.loginfo("✅ Cleanup complete")
 
 
 # -----------------------------------------------------------
