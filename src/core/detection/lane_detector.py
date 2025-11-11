@@ -14,7 +14,7 @@ from src.utils.image_utils import to_roi, to_bev, color_filter, get_hough_image
 from collections import deque
 
 class LaneDetector:
-    def __init__(self, image_topic="/usb_cam/image_raw/compressed", config=None, heading_error_queue=None):
+    def __init__(self, image_topic="/usb_cam/image_raw/compressed", config=None, error_queue=None):
         """
         LaneDetector 클래스
         - 이미지 구독 및 차선 인식 (BEV 변환 + Hough + Sliding Window)
@@ -34,10 +34,13 @@ class LaneDetector:
             tcp_nodelay=True
         )
 
-        if heading_error_queue == None:
-            self.heading_error_queue = deque([0] * 10)
+        if error_queue == None:
+            self.error_queue = {
+                'heading': deque([0] * 20),
+                'lat': deque([0] * 20),
+            }
         else:
-            self.heading_error_queue = heading_error_queue
+            self.error_queue = error_queue
 
         rospy.loginfo("📷 LaneDetector subscribed to {}".format(image_topic))
 
@@ -99,8 +102,11 @@ class LaneDetector:
         
         print("center_x_bottom:", center_x_bottom, "offset:", offset)
 
-        self.heading_error_queue.popleft()
-        self.heading_error_queue.append(heading)
+        self.error_queue['heading'].popleft()
+        self.error_queue['lat'].popleft()
+
+        self.error_queue['heading'].append(heading)
+        self.error_queue['lat'].append(offset)
 
         return {
             "heading": heading, "offset": offset,
