@@ -5,7 +5,7 @@ import rospy, time, math, os
 import cv2
 import numpy as np
 from cv_bridge import CvBridge
-from pyzbar import pyzbar
+# from pyzbar import pyzbar
 from geometry_msgs.msg import Twist
 
 # OpenCV ArUco dictionary and parameters (handle version compatibility)
