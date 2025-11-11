@@ -1,5 +1,4 @@
 
-
 """
 Simple Video Recording Configuration
 """

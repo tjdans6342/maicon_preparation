@@ -24,22 +24,21 @@ from src.core.control.controller import Controller
 
 from src.configs.lane_config import LaneConfig
 
-    <<<<<<< HEAD
 
 
-    #### video recoding
+#### video recoding
 
-    from src.configs.video_config import VideoConfig
-    from src.core.recording.video_recorder import VideoRecorder
+from src.configs.video_config import VideoConfig
+from src.core.recording.video_recorder import VideoRecorder
 
-    ########
+########
 
 
 
-    =======
-    from collections import deque
-    >>>>>>> 01b9e2eb03a7082bf2780bc0fe1341f769d58605
-
+    
+from collections import deque
+    
+    
 class Robot:
     """
     ✅ Robot Main Controller
