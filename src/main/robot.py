@@ -3,10 +3,10 @@
 
 DARK_HLS = [[0, 0, 0], [180, 140, 200]] # 기존에 했던 값
 
-# WHITE_HLS = [(0, 160, 0), (180, 255, 255)] # whilte line_1007
-# WHITE_HLS = [(0, 150, 0), (180, 255, 255)] # whilte line 1121
-WHITE_HLS = [(0, 160, 0), (180, 255, 255)] # whilte line 1213
-# WHITE_HLS = [(0, 120, 0), (180, 255, 255)] # whilte line 2139
+# WHITE_HLS = [(0, 160, 0), (180, 255, 255)] # white line_1007
+WHITE_HLS = [(0, 150, 0), (180, 255, 255)] # white line 1121
+# WHITE_HLS = [(0, 160, 0), (180, 255, 255)] # white line 1213
+# WHITE_HLS = [(0, 120, 0), (180, 255, 255)] # white line 2139
 
 YELLOW_HLS = [(20, 70, 12), (40, 130, 110)] # yellow line
 
@@ -18,9 +18,11 @@ import numpy as np
 
 from src.core.detection.lane_detector import LaneDetector
 from src.core.detection.fire_detector import FireDetector
-from src.core.detection.aruco_trigger import ArucoTrigger
+# from src.core.detection.aruco_trigger import ArucoTrigger
+from src.core.detection.aruco_trigger_capture_yolo import ArucoTrigger
 from src.core.control.pid_controller import PIDController
 from src.core.control.controller import Controller
+
 
 from src.configs.lane_config import LaneConfig
 
@@ -82,6 +84,30 @@ class Robot:
             'basic:linear0.15': [0.1 * 1.5, 0.7 * 1.5, 0.7 * 1.5],
             'basic:linear0.20': [0.1 * 2.0, 0.7 * 2.0, 0.7 * 2.0],
             'basic:linear0.30': [0.1 * 3.0, 0.7 * 3.0, 0.7 * 3.0],
+            'linear0.50': [0.1 * 5.0, 0.3 * 3.0, 0.3 * 3.0],
+
+             # safety
+            'basic:safety0.05':  [0.1 * 0.5, 0.7 * 3.0, 0.7 * 1.0], 
+            'basic:safety0.10': [0.1 * 1.0, 0.7 * 1.0, 0.7 * 1.0], # same 'basic:linear0.10'
+            'basic:safety0.20': [0.1 * 2.0, 0.7 * 2.0, 0.7 * 2.0], # same 'basic:linear0.20'
+
+           
+        
+        }
+
+        best_combinations = [
+            ['basic:linear0.10', 'basic:curved0.10', 1],
+            ['basic:linear0.30', 'basic:curved0.10', 5],
+            ['linear0.50', 'basic:safety0.10', 20],
+        ]
+
+        self.error_queue_size = 20 # can be tuned
+        self.error_queue = {
+            'heading': deque([0] * self.error_queue_size),
+            'lat': deque([0] * self.error_queue_size),
+        }
+        self.linear_option = self.control_configs['basic:safety0.10'] # can be tuned
+        self.curved_option = self.control_configs['basic:safety0.10'] # can be tuned
 
             # curved
             'basic:curved0.10': [0.1 * 1.0, 0.7 * 1.0, 0.7 * 1.0], # same 'basic:linear0.10'
@@ -94,7 +120,7 @@ class Robot:
 
         self.base_speed, self.lat_weight, self.heading_weight = self.linear_option
 
-        self.lane = LaneDetector(image_topic="/usb_cam/image_raw/compressed", config=cfg, heading_error_queue=self.heading_error_queue)
+        self.lane = LaneDetector(image_topic="/usb_cam/image_raw/compressed", config=cfg, error_queue=self.error_queue)
 
         # ArucoTrigger 초기화 & Controller 초기화 & PIDController 초기화
         self.aruco = ArucoTrigger(cmd_topic="/cmd_vel")
@@ -139,8 +165,8 @@ class Robot:
 
         # change mode (linear ↔ curved)
         is_curved = False
-        for he in self.heading_error_queue:
-            is_curved = is_curved or (abs(he) > 0.5)
+        for he, le in zip(self.error_queue['heading'], self.error_queue['lat']):
+            is_curved = is_curved or (abs(he) > 0.5) or (abs(le) > 1.0)
         
         if is_curved: # curved mode
             print("Passing Curved line!!")
@@ -163,7 +189,14 @@ class Robot:
         print("heading_err: ", heading_err, "lateral_err: ", lateral_err)
         print("cmd_ang: ", control)
 
-        self.aruco.step()  # 아루코 액션 중이면 계속 실행
+        self.aruco.step()  # 아루코 액션 중이면 계속 실행 (이거 사실 필요 없을 거 같은데..)
+
+
+            # Add frame to video recorder
+
+        if self.lane.image is not None:
+            self.video_recorder.add_frame(self.lane.image)
+
 
 
             # Add frame to video recorder
