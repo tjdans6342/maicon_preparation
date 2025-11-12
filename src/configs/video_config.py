@@ -20,7 +20,7 @@ class VideoConfig:
         # Video settings
         self.fps = 15  # Frames per second
         self.codec = "XVID"  # Video codec (XVID, mp4v, MJPG)
-        self.resolution = None  # None = keep original size
+        self.resolution = (316, 316)  # None = keep original size
         
         # Overlay settings
         self.add_timestamp = True  # Add timestamp text to video

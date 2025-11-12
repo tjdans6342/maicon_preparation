@@ -78,27 +78,26 @@ class Robot:
         
         # Control 설정값
         self.control_configs = {
-            # linear
             'default-setting': [0.05, 1.2, 1.0],
-            'basic:linear0.10': [0.1 * 1.0, 0.7 * 1.0, 0.7 * 1.0], 
-            'basic:linear0.15': [0.1 * 1.5, 0.7 * 1.5, 0.7 * 1.5],
-            'basic:linear0.20': [0.1 * 2.0, 0.7 * 2.0, 0.7 * 2.0],
-            'basic:linear0.30': [0.1 * 3.0, 0.7 * 3.0, 0.7 * 3.0],
+
+            # linear
+            'linear0.10': [0.1 * 1.0, 0.3 * 1.0, 0.3 * 1.0], 
+            'linear0.15': [0.1 * 1.5, 0.3 * 1.5, 0.3 * 1.5],
+            'linear0.20': [0.1 * 2.0, 0.3 * 2.0, 0.3 * 2.0],
+            'linear0.30': [0.1 * 3.0, 0.3 * 3.0, 0.3 * 3.0],
             'linear0.50': [0.1 * 5.0, 0.3 * 3.0, 0.3 * 3.0],
 
-             # safety
-            'basic:safety0.05':  [0.1 * 0.5, 0.7 * 3.0, 0.7 * 1.0], 
-            'basic:safety0.10': [0.1 * 1.0, 0.7 * 1.0, 0.7 * 1.0], # same 'basic:linear0.10'
-            'basic:safety0.20': [0.1 * 2.0, 0.7 * 2.0, 0.7 * 2.0], # same 'basic:linear0.20'
-
-           
-        
+            # curved
+            'curved0.10': [0.1 * 1.0, 0.7 * 1.0, 0.7 * 1.0], 
+            'curved0.15': [0.1 * 1.5, 0.7 * 1.5, 0.7 * 1.5],
+            'curved0.20': [0.1 * 2.0, 0.7 * 2.0, 0.7 * 2.0],
+            'curved0.30': [0.1 * 3.0, 0.7 * 3.0, 0.7 * 3.0],
         }
 
         best_combinations = [
-            ['basic:linear0.10', 'basic:curved0.10', 1],
-            ['basic:linear0.30', 'basic:curved0.10', 5],
-            ['linear0.50', 'basic:safety0.10', 20],
+            ['curved0.10', 'curved0.10', 1],
+            ['curved0.30', 'curved0.10', 5], # (abs(he) < 0.5)
+            ['linear0.50', 'curved0.10', 20], # (abs(he) < 0.5) and (abs(le) < 1.0)
         ]
 
         self.error_queue_size = 20 # can be tuned
@@ -106,17 +105,8 @@ class Robot:
             'heading': deque([0] * self.error_queue_size),
             'lat': deque([0] * self.error_queue_size),
         }
-        self.linear_option = self.control_configs['basic:safety0.10'] # can be tuned
-        self.curved_option = self.control_configs['basic:safety0.10'] # can be tuned
-
-            # curved
-            'basic:curved0.10': [0.1 * 1.0, 0.7 * 1.0, 0.7 * 1.0], # same 'basic:linear0.10'
-        }
-
-        self.heading_error_queue_size = 5 # can be tuned
-        self.heading_error_queue = deque([0] * self.heading_error_queue_size)
-        self.linear_option = self.control_configs['basic:linear0.20'] # can be tuned
-        self.curved_option = self.control_configs['basic:curved0.10'] # can be tuned
+        self.linear_option = self.control_configs['linear0.20'] # can be tuned
+        self.curved_option = self.control_configs['curved0.10'] # can be tuned
 
         self.base_speed, self.lat_weight, self.heading_weight = self.linear_option
 
@@ -164,15 +154,18 @@ class Robot:
         lateral_err = lane_info["offset"]
 
         # change mode (linear ↔ curved)
-        is_curved = False
+        is_linear = True
         for he, le in zip(self.error_queue['heading'], self.error_queue['lat']):
-            is_curved = is_curved or (abs(he) > 0.5) or (abs(le) > 1.0)
+            if not (abs(he) < 0.2):
+                is_linear = False
+                break
         
-        if is_curved: # curved mode
+        if is_linear: # linear mode
+            self.base_speed, self.lat_weight, self.heading_weight= self.linear_option 
+        else: # curved mode
             print("Passing Curved line!!")
             self.base_speed, self.lat_weight, self.heading_weight = self.curved_option
-        else: # linear mode
-            self.base_speed, self.lat_weight, self.heading_weight= self.linear_option            
+                       
 
         print("total_heading:", self.heading_weight * heading_err, "total_later:", self.lat_weight * lateral_err)
 
