@@ -38,6 +38,12 @@ from src.core.recording.video_recorder import VideoRecorder
 
 ########
 
+### fire detection
+
+### Fire detection
+from src.core.detection.fire_building_detector import FireBuildingDetector
+
+
 
 
     
@@ -142,7 +148,22 @@ class Robot:
         # rospy.loginfo("✅ All subsystems initialized.")
 
 
+        ### fire detection
 
+            ### Fire Building Detection
+        ## TODO:
+        ## TODO
+        self.fire_detector = FireBuildingDetector(
+            weights_path="/home/jetson/catkin_ws/src/weights/best.pt"  ## TODO: Change this path
+        )
+        self.fire_image_folder = "/home/jetson/catkin_ws/src/test_images"  ## TODO: Change this path
+        self.detected_fire_buildings = []
+        
+        rospy.loginfo("✅ Fire detector initialized.")
+
+
+
+        
     # -------------------------------------------------------
     #  차선 기반 주행 모드
     # -------------------------------------------------------
@@ -248,6 +269,20 @@ class Robot:
     def run(self):
         rate = rospy.Rate(20)
 
+
+        ### TO SEE fire detection whenwhen start
+        rospy.loginfo("🔥 Starting fire detection...")
+        fire_buildings = self.check_fire_detection()
+        
+        if fire_buildings:
+            rospy.loginfo(f"🔥 Fire detected in buildings: {fire_buildings}")
+            for building_num in fire_buildings:
+                rospy.loginfo(f"🤖 Navigating to building {building_num}")
+                self.navigate_to_fire_building(building_num)
+        else:
+            rospy.loginfo("✅ No fire detected, starting normal operation")
+        
+
         #Register cleanup callback
         
         # rospy.on_shutdown(self._cleanup)
@@ -278,6 +313,61 @@ class Robot:
 
             rate.sleep()
 
+
+    #### fire detection
+
+        # -------------------------------------------------------
+    #  Fire Detection Methods
+    # -------------------------------------------------------
+    def check_fire_detection(self):
+        """
+        Randomly select building image and detect fires
+        Returns list of building numbers with fire
+        """
+        if not hasattr(self, 'fire_detector'):
+            return []
+        
+        image_path, fire_buildings = self.fire_detector.detect_random_from_folder(
+            folder_path=self.fire_image_folder,
+            conf_threshold=0.25,
+            img_size=416
+        )
+        
+        if fire_buildings:
+            rospy.loginfo(f"🔥 Fire detected in buildings: {fire_buildings}")
+            self.detected_fire_buildings = fire_buildings
+            return fire_buildings
+        else:
+            rospy.loginfo("✅ No fire detected")
+            return []
+    
+    def navigate_to_fire_building(self, building_number):
+        """
+        Navigate robot to specified building number
+        
+        Args:
+            building_number: Building number (1-9)
+        """
+        ## TODO: Map building numbers to your actual ArUco marker IDs
+        building_to_marker = {
+            1: 1,
+            2: 2,
+            3: 3,
+            4: 4,
+            5: 5,
+            6: 6,
+            7: 7,
+            8: 8,
+            9: 9
+        }
+        
+        marker_id = building_to_marker.get(building_number)
+        if marker_id:
+            rospy.loginfo(f"🤖 Navigating to building {building_number} (marker {marker_id})")
+            ## TODO: Implement navigation logic using your ArUco system
+        else:
+            rospy.logwarn(f"No marker mapping for building {building_number}")
+    
     def _cleanup(self):
         """
         Cleanup resources on ROS shutdown
