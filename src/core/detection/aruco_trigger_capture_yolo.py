@@ -73,24 +73,31 @@ class ArucoTrigger(object):
             # id=0 마커: 1번째 등장 -> 오른쪽 90도 회전, 2번째 등장 -> 오른쪽 20도 회전 후 YOLO 이미지 캡처
             # 0: {1: [("right", 90), ("left", 90)], 2: [("right", 20), ("yolo_capture", 0)]},
             0: {
-                1: [("right", 90), ("left", 90)]
+                1: [("drive", 0.25, 0.2111), ("right", 90), ("left", 90)],
+            },
+            2: {
+                1: [("drive", 0.3, 0.2111), ("right", 90)],
+                2: [("left", 20), ("drive", 0.5, 0.2111), ("left", 90)],
             },
             # # id=2 마커: 1번째 등장 -> 오른쪽 90도 회전
             # 2: {1: ("right", 90)},
             # # id=3 마커: 1번째 등장 -> 왼쪽 90도 회전 후 일반 이미지 캡처, 2번째 등장 -> 오른쪽 90도 회전
             # 3: {1: [("left", 90), ("capture", 0)], 2: ("right", 90)},
             3: {
-                1: [("left", 90)], 2: [("left", 0)],
+                1: [("drive", 0.35, 0.2111), ("left", 90)], 
+                2: [("left", 0)],
             },
             # # id=4 마커: 2번째 등장 -> 왼쪽 90도 회전
-            4: {
-                1: ("right", 90), 2: [("drive", 1.0, 0.1), ("left", 90)],
-            },
+            # 4: {
+                # 1: [("drive", 0.3, 0.2111), ("right", 90)], 
+                # 2: [("drive", 0.2, 0.2111), ("left", 90)],
+            # },
             5: {
-                1: ("right", 90), 2: [("left", 90)]
+                1: [("drive", 0.3, 0.2111), ("right", 90)], 
+                2: [("drive", 0.3, 0.2111), ("left", 90)],
             },
             10: {
-                1: [("right", 90)]
+                1: [("drive", 0.25, 0.2111), ("right", 90)],
             },
 
         }
@@ -328,7 +335,7 @@ class ArucoTrigger(object):
 
         # 정지 명령
         self.drive_pub.publish(Twist())
-        rospy.loginfo(f"[ArucoTrigger] Drove {distance:.2f}m at {speed:.2f}m/s")
+        rospy.loginfo("[ArucoTrigger] Drove {:.2f}m at {:.2f}m/s".format(distance, speed))
 
 
     # step: EXECUTE_ACTION 모드에서 pending_actions의 액션들을 순차적으로 실행

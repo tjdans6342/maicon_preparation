@@ -108,8 +108,8 @@ class Robot:
             'heading': deque([0] * self.error_queue_size),
             'lat': deque([0] * self.error_queue_size),
         }
-        self.linear_option = self.control_configs['linear0.10'] # can be tuned
-        self.curved_option = self.control_configs['curved0.10'] # can be tuned
+        self.linear_option = self.control_configs['linear0.30'] # can be tuned
+        self.curved_option = self.control_configs['curved0.20'] # can be tuned
 
         self.base_speed, self.lat_weight, self.heading_weight = self.linear_option
 
@@ -159,7 +159,7 @@ class Robot:
         # change mode (linear ↔ curved)
         is_linear = True
         for he, le in zip(self.error_queue['heading'], self.error_queue['lat']):
-            if not (abs(he) < 0.2):
+            if not (abs(he) < 0.3):
                 is_linear = False
                 break
         
