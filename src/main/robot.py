@@ -122,7 +122,9 @@ class Robot:
         # self.fire = FireDetector(topic_name="/fire_cam/image_raw/compressed")
 
 
-        self.mode = "LANE_FOLLOW"  # 초기 모드 설정
+        self.mode = "LANE_FOLLOW"  # 초기 모드
+        # 가능한 모드: LANE_FOLLOW, ARUCO, POTHOLE_AVOID
+
 
         self.last_switch_time = rospy.get_time()
 
@@ -226,6 +228,17 @@ class Robot:
             if frame is not None:
                 # pass
                 self.aruco.observe_and_maybe_trigger(frame)
+
+        # --- 포트홀 감지 (임시 로직, 추후 YOLO로 교체 가능) ---
+        if self.mode == "LANE_FOLLOW" and self.lane.image_dict['Hough'] is not None:
+            pothole_detected = self.aruco.observe_pothole(self.lane.image_dict['Hough'])
+            if pothole_detected:
+                rospy.loginfo("[Robot] 🕳️ Pothole detected! Triggering avoidance.")
+                self.aruco.pending_actions = list(self.aruco.rules["pothole"][1])
+                self.aruco.mode = "EXECUTE_ACTION"
+                self.mode = "ARUCO"
+                return
+
 
         # --- 아루코 상태 확인 ---
         if self.aruco.mode == "EXECUTE_ACTION":

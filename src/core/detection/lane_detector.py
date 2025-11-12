@@ -42,6 +42,8 @@ class LaneDetector:
         else:
             self.error_queue = error_queue
             
+        self.image_dict = {}
+
         rospy.loginfo("📷 LaneDetector subscribed to {}".format(image_topic))
 
     # -------------------------------------------------------
@@ -205,6 +207,18 @@ class LaneDetector:
             minpix=self.cfg.minpix
         )
 
+        self.image_dict = {
+            "Original": image,
+            "BEV": bev_img,
+            "Filtered": filtered_img,
+            "gray": gray_img,
+            "Blurred": blur_img,
+            "binary": binary_img,
+            "Canny": canny_img,
+            "Hough": hough_img,
+            # "Lane Detection": lane_detected_img
+        }
+
 
         if self.cfg.display_mode:
             lane_detected_img = self._visualize_lane_detection(
@@ -216,17 +230,7 @@ class LaneDetector:
                 nwindows=self.cfg.nwindows
             )
 
-            image_dict = {
-                "Original": image,
-                "BEV": bev_img,
-                "Filtered": filtered_img,
-                "gray": gray_img,
-                "Blurred": blur_img,
-                "binary": binary_img,
-                "Canny": canny_img,
-                "Hough": hough_img,
-                "Lane Detection": lane_detected_img
-            }
+            self.image_dict["Lane Detection"] = lane_detected_img
 
             window_pos = [
                 (0, 0), (600, 0), (1200, 0),
@@ -242,7 +246,7 @@ class LaneDetector:
             for i, name in enumerate(display_names):
                 cv2.namedWindow(name)
                 cv2.moveWindow(name, window_pos[i][0], window_pos[i][1])
-                cv2.imshow(name, image_dict[name])
+                cv2.imshow(name, self.image_dict[name])
 
             cv2.waitKey(1)
         
