@@ -71,13 +71,35 @@ class ArucoTrigger(object):
         # 예시로 캡처 액션이 포함된 규칙들 정의
         self.rules = {
             # id=0 마커: 1번째 등장 -> 오른쪽 90도 회전, 2번째 등장 -> 오른쪽 20도 회전 후 YOLO 이미지 캡처
-            0: {1: [("right", 90)], 2: [("right", 20), ("yolo_capture", 0)]},
-            # id=2 마커: 1번째 등장 -> 오른쪽 90도 회전
-            2: {1: ("right", 90)},
-            # id=3 마커: 1번째 등장 -> 왼쪽 90도 회전 후 일반 이미지 캡처, 2번째 등장 -> 오른쪽 90도 회전
-            3: {1: [("left", 90), ("capture", 0)], 2: ("right", 90)},
-            # id=4 마커: 2번째 등장 -> 왼쪽 90도 회전
-            4: {2: ("left", 90)},
+            # 0: {1: [("right", 90), ("left", 90)], 2: [("right", 20), ("yolo_capture", 0)]},
+            0: {
+                1: [("drive", 0.25, 0.2111), ("right", 90), ("left", 90)],
+            },
+            2: {
+                1: [("drive", 0.3, 0.2111), ("right", 90)],
+                2: [("left", 20), ("drive", 0.5, 0.2111), ("left", 90)],
+            },
+            # # id=2 마커: 1번째 등장 -> 오른쪽 90도 회전
+            # 2: {1: ("right", 90)},
+            # # id=3 마커: 1번째 등장 -> 왼쪽 90도 회전 후 일반 이미지 캡처, 2번째 등장 -> 오른쪽 90도 회전
+            # 3: {1: [("left", 90), ("capture", 0)], 2: ("right", 90)},
+            3: {
+                1: [("drive", 0.35, 0.2111), ("left", 90)], 
+                2: [("left", 0)],
+            },
+            # # id=4 마커: 2번째 등장 -> 왼쪽 90도 회전
+            # 4: {
+                # 1: [("drive", 0.3, 0.2111), ("right", 90)], 
+                # 2: [("drive", 0.2, 0.2111), ("left", 90)],
+            # },
+            5: {
+                1: [("drive", 0.3, 0.2111), ("right", 90)], 
+                2: [("drive", 0.3, 0.2111), ("left", 90)],
+            },
+            10: {
+                1: [("drive", 0.25, 0.2111), ("right", 90)],
+            },
+
         }
 
         # ArUco 마커 검출 헬퍼 객체 생성
@@ -94,7 +116,13 @@ class ArucoTrigger(object):
 
         # 마커 트리거 쿨다운 설정 (동일 마커가 연속해서 트리거되지 않도록)
         self.cooldown_default = 5.0  # 기본 쿨다운 시간 (초)
-        self.cooldown_per_id = {0: 6.5, 2: 1.0, 3: 4.0, 4: 1.0}  # ID별 개별 쿨다운 시간
+        self.cooldown_per_id = {
+            0: 6.5,
+            2: 1.0,
+            4: 8.0,
+            5: 5.0,
+            10: 10.0
+        }  # ID별 개별 쿨다운 시간
         self.last_trigger_times = {}  # 마커 ID별 마지막 트리거 시각 기록
 
         # 화재 건물(일반) 이미지 저장 디렉토리 설정
@@ -119,7 +147,7 @@ class ArucoTrigger(object):
         self._last_marker_id = None
 
         # 노이즈 제거를 위한 연속 프레임 요구 횟수
-        self.required_consecutive = 3
+        self.required_consecutive = 1
         # 각 마커ID별 현재 연속 만족 프레임 횟수
         self._consec = {}
 
@@ -184,7 +212,7 @@ class ArucoTrigger(object):
 
         # LANE_FOLLOW 모드가 아니라면 트리거 처리 없이 종료
         if self.mode != "LANE_FOLLOW":
-            return
+            return False
 
         now = time.time()
         # 현재 프레임에서 ArUco 마커 검출
@@ -193,7 +221,7 @@ class ArucoTrigger(object):
             # 마커 없으면 연속 감지 카운트 초기화
             self._consec = {}
             self._last_marker_id = None
-            return
+            return False
 
         # 유효성 조건(_gate)에 맞는 마커만 필터링
         dets = [d for d in dets if self._gate(d)]
@@ -201,7 +229,7 @@ class ArucoTrigger(object):
             # 조건 만족 마커 없으면 초기화 후 종료
             self._consec = {}
             self._last_marker_id = None
-            return
+            return False
 
         # 가장 큰 마커 하나 선택 (면적이 가장 큰 것)
         det = max(dets, key=lambda x: x["area"])
@@ -218,13 +246,13 @@ class ArucoTrigger(object):
 
         # 설정한 연속 프레임 횟수 미만이면 트리거하지 않고 대기
         if self._consec[mid] < self.required_consecutive:
-            return
+            return False
 
         # 쿨다운 체크: 마지막 트리거 시각과 비교
         last = self.last_trigger_times.get(mid, 0.0)
         cooldown = self.cooldown_per_id.get(mid, self.cooldown_default)
         if (now - last) < cooldown:
-            return
+            return False
 
         # 등장 횟수(nth) 갱신
         nth = self.seen_counts.get(mid, 0) + 1
@@ -233,6 +261,7 @@ class ArucoTrigger(object):
         # 규칙에 해당 (marker id와 nth 조합)하는 액션이 정의되어 있다면 실행
         if mid in self.rules and nth in self.rules[mid]:
             actions = self.rules[mid][nth]
+            print("actoions info:", mid, nth)
             if isinstance(actions, tuple):
                 actions = [actions]
             # pending_actions 리스트에 액션들 저장하고 모드 전환
@@ -242,6 +271,9 @@ class ArucoTrigger(object):
             self.last_trigger_times[mid] = now
             # 연속 카운트 리셋 (다음 트리거 대비)
             self._consec = {}
+            return True
+
+        return False
 
     # _rotate_in_place: 주어진 방향과 각도로 로봇을 제자리 회전
     def _rotate_in_place(self, direction, degrees, ang_speed=1.0):
@@ -277,6 +309,35 @@ class ArucoTrigger(object):
         # 회전 종료 후 정지 명령 한 번 퍼블리시
         self.drive_pub.publish(Twist())
 
+    def _drive_distance(self, distance=1.0, speed=0.1):
+        """
+            지정한 거리(m)만큼 지정 속도(m/s)로 직진 주행하는 함수.
+
+            Parameters
+            ----------
+            distance : float
+                이동할 거리 (단위: m)
+            speed : float
+                주행 속도 (단위 : m/s)
+        """
+        msg = Twist()
+        msg.linear.x = speed
+        msg.angular.z = 0.0
+
+        rate = rospy.Rate(20)  # 20Hz 퍼블리시
+        start_time = rospy.Time.now().to_sec()
+        duration = abs(distance / speed)  # 이동에 필요한 시간
+
+        # 지정된 시간 동안 속도 명령 퍼블리시
+        while (rospy.Time.now().to_sec() - start_time) < duration and not rospy.is_shutdown():
+            self.drive_pub.publish(msg)
+            rate.sleep()
+
+        # 정지 명령
+        self.drive_pub.publish(Twist())
+        rospy.loginfo("[ArucoTrigger] Drove {:.2f}m at {:.2f}m/s".format(distance, speed))
+
+
     # step: EXECUTE_ACTION 모드에서 pending_actions의 액션들을 순차적으로 실행
     def step(self):
         if self.mode == "EXECUTE_ACTION" and self.pending_actions:
@@ -285,16 +346,25 @@ class ArucoTrigger(object):
             rospy.sleep(0.15)
 
             # 실행할 액션 하나 꺼내기
-            direction, deg = self.pending_actions.pop(0)
+            action = self.pending_actions.pop(0)
+
+            # --- 인자 언패킹 (길이에 따라 자동 처리) ---
+            direction = action[0]
+            args = action[1:]
+            # ---------------------------------------
             if direction == "capture":
-                # 일반 캡처 액션
                 self._capture_image()
             elif direction == "yolo_capture":
-                # YOLO 추론용 캡처 액션
                 self._capture_yolo_image()
+            elif direction == "drive":
+                # drive_distance(distance, speed)
+                distance = args[0] if len(args) >= 1 else 1.0
+                speed = args[1] if len(args) >= 2 else 0.1
+                self._drive_distance(distance=distance, speed=speed)
             else:
-                # 회전 액션의 경우 (오른쪽/왼쪽/turn 등)
-                self._rotate_in_place(direction, deg, ang_speed=1.0)
+                # 회전 관련 명령 (오른쪽, 왼쪽, turn 등)
+                degrees = args[0] if len(args) >= 1 else 90.0
+                self._rotate_in_place(direction, degrees, ang_speed=1.0)
 
             # 모든 액션을 끝마치면 모드를 LANE_FOLLOW로 복귀
             if not self.pending_actions:

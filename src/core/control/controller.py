@@ -37,7 +37,7 @@ class Controller:
     # -------------------------------------------------------
     def stop(self):
         self.publish(0.0, 0.0)
-        rospy.loginfo("🛑 Controller: STOP command sent")
+        # rospy.loginfo("🛑 Controller: STOP command sent")
 
     # -------------------------------------------------------
     #  마지막 명령 조회 (디버깅용)

@@ -41,7 +41,7 @@ class LaneDetector:
             }
         else:
             self.error_queue = error_queue
-
+            
         rospy.loginfo("📷 LaneDetector subscribed to {}".format(image_topic))
 
     # -------------------------------------------------------
@@ -100,7 +100,7 @@ class LaneDetector:
         if center_x_bottom == 0:
             offset = 0
         
-        print("center_x_bottom:", center_x_bottom, "offset:", offset)
+        # print("center_x_bottom:", center_x_bottom, "offset:", offset)
 
         self.error_queue['heading'].popleft()
         self.error_queue['lat'].popleft()
@@ -205,7 +205,6 @@ class LaneDetector:
             minpix=self.cfg.minpix
         )
 
-        print(self.cfg.display_mode)
 
         if self.cfg.display_mode:
             lane_detected_img = self._visualize_lane_detection(
@@ -238,7 +237,7 @@ class LaneDetector:
 
             display_names = self.cfg.image_names
 
-            print(display_names)
+            # print(display_names)
 
             for i, name in enumerate(display_names):
                 cv2.namedWindow(name)
