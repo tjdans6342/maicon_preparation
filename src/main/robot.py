@@ -20,7 +20,7 @@ import time
 import numpy as np
 
 from src.core.detection.lane_detector import LaneDetector
-from src.core.detection.fire_detector import FireDetector
+#from src.core.detection.fire_detector import FireDetector
 # from src.core.detection.aruco_trigger import ArucoTrigger
 from src.core.detection.aruco_trigger_capture_yolo import ArucoTrigger
 from src.core.control.pid_controller import PIDController
@@ -44,7 +44,7 @@ from src.core.recording.lane_analysis_recorder import LaneAnalysisRecorder
 ### fire detection
 
 ### Fire detection
-from src.core.detection.fire_building_detector import FireBuildingDetector
+#from src.core.detection.fire_building_detector import FireBuildingDetector
 
 
 
@@ -155,13 +155,13 @@ class Robot:
             ### Fire Building Detection
         ## TODO:
         ## TODO
-        self.fire_detector = FireBuildingDetector(
-            weights_path="/home/jetson/catkin_ws/src/weights/best.pt"  ## TODO: Change this path
-        )
-        self.fire_image_folder = "/home/jetson/catkin_ws/src/test_images"  ## TODO: Change this path
-        self.detected_fire_buildings = []
+        # self.fire_detector = FireBuildingDetector(
+        #     weights_path="/home/jetson/catkin_ws/src/weights/best.pt"  ## TODO: Change this path
+        # )
+        # self.fire_image_folder = "/home/jetson/catkin_ws/src/test_images"  ## TODO: Change this path
+        # self.detected_fire_buildings = []
         
-        rospy.loginfo("✅ Fire detector initialized.")
+        # rospy.loginfo("✅ Fire detector initialized.")
 
 
         ### lane analysis recording
@@ -278,20 +278,20 @@ class Robot:
 
 
         ### TO SEE fire detection whenwhen start
-        rospy.loginfo("🔥 Starting fire detection...")
-        fire_buildings = self.check_fire_detection()
+        # rospy.loginfo("🔥 Starting fire detection...")
+        # fire_buildings = self.check_fire_detection()
         
-        if fire_buildings:
-            rospy.loginfo(f"🔥 Fire detected in buildings: {fire_buildings}")
-            for building_num in fire_buildings:
-                rospy.loginfo(f"🤖 Navigating to building {building_num}")
-                self.navigate_to_fire_building(building_num)
-        else:
-            rospy.loginfo("✅ No fire detected, starting normal operation")
+        # if fire_buildings:
+        #     rospy.loginfo("🔥 Fire detected in buildings: {}".format(fire_buildings))
+        #     for building_num in fire_buildings:
+        #         rospy.loginfo("🤖 Navigating to building {}".format(building_num))
+        #         self.navigate_to_fire_building(building_num)
+        # else:
+        #     rospy.loginfo("✅ No fire detected, starting normal operation")
         
 
-        # Register cleanup callback
-        rospy.on_shutdown(self._cleanup)
+        # # Register cleanup callback
+        # rospy.on_shutdown(self._cleanup)
 
         while not rospy.is_shutdown():
             self._check_mode_transition()
@@ -338,7 +338,7 @@ class Robot:
         )
         
         if fire_buildings:
-            rospy.loginfo(f"🔥 Fire detected in buildings: {fire_buildings}")
+            rospy.loginfo("🔥 Fire detected in buildings: {}".format(fire_buildings))
             self.detected_fire_buildings = fire_buildings
             return fire_buildings
         else:
@@ -367,10 +367,10 @@ class Robot:
         
         marker_id = building_to_marker.get(building_number)
         if marker_id:
-            rospy.loginfo(f"🤖 Navigating to building {building_number} (marker {marker_id})")
+            rospy.loginfo("🤖 Navigating to building {} (marker {})".format(building_number, marker_id))
             ## TODO: Implement navigation logic using your ArUco system
         else:
-            rospy.logwarn(f"No marker mapping for building {building_number}")
+            rospy.logwarn("No marker mapping for building {}".format(building_number))
     
     def _cleanup(self):
         """

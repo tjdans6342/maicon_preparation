@@ -19,8 +19,8 @@ from datetime import datetime
 # ============================================================
 
 # Default paths (can be changed)
-DEFAULT_VIDEO_DIR = "robot_videos"  # Directory containing videos
-DEFAULT_OUTPUT_DIR = None  # None = save with video, or specify different path
+DEFAULT_VIDEO_DIR = "/media/r1mini/MAICON/sungmoon/maicon_preparation/videos/robot_video_20251111_221904.avi"  # Directory containing videos
+DEFAULT_OUTPUT_DIR = "/media/r1mini/MAICON/sungmoon/maicon_preparation/images"  # None = save with video, or specify different path
 
 # Frame extraction parameters
 DEFAULT_FPS = 1  # Frames per second (1 = extract 1 image per second)

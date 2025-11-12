@@ -22,7 +22,7 @@ from datetime import datetime
 
 # Recording settings
 ENABLED = True  # Enable/disable recording
-OUTPUT_DIR = "robot_videos/lane_analysis"  # Output directory
+OUTPUT_DIR = "/media/r1mini/MAICON/sungmoon/maicon_preparation/videos"  # Output directory
 FPS = 15  # Video frame rate
 CODEC = "XVID"  # Video codec (XVID, mp4v, MJPG)
 

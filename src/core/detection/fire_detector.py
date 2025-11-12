@@ -7,7 +7,7 @@ Optimized for Jetson Nano
 
 import os
 import random
-import torch
+# import torch
 from pathlib import Path
 from typing import List
 
@@ -15,7 +15,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
 
 ## TODO: Adjust import path if fire_detection_pipeline is in different location
-from 화재_탐지.fire_detection_pipeline import detect_fire_buildings
+from fire.fire_detection_pipeline import detect_fire_buildings
 
 
 class FireBuildingDetector:
@@ -41,7 +41,7 @@ class FireBuildingDetector:
         else:
             self.device = device
         
-        print(f"[FireBuildingDetector] Using device: {self.device}")
+        print("[FireBuildingDetector] Using device: {}".format(self.device))
         
     def detect(self, image_path, conf_threshold=0.25, img_size=416):
         """
@@ -82,11 +82,11 @@ class FireBuildingDetector:
         images = [f for f in folder.iterdir() if f.suffix.lower() in image_extensions]
         
         if not images:
-            print(f"[FireBuildingDetector] No images found in {folder_path}")
+            print("[FireBuildingDetector] No images found in {}".format(folder_path))
             return None, []
         
         selected_image = random.choice(images)
-        print(f"[FireBuildingDetector] Selected image: {selected_image.name}")
+        print("[FireBuildingDetector] Selected image: {}".format(selected_image.name))
         
         fire_buildings = self.detect(
             image_path=str(selected_image),

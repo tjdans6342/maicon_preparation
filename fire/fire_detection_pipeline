@@ -1,0 +1,135 @@
+# -*- coding: utf-8 -*-
+"""
+Fire Detection Pipeline - Optimized for Jetson Nano
+Returns building numbers (1-9) with fire detected
+"""
+
+from pathlib import Path
+from typing import List
+import numpy as np
+from ultralytics import YOLO
+import torch
+
+
+def detect_fire_buildings(image_path, weights_path, device='cuda', conf_threshold=0.25, img_size=416):
+    """
+    Detect which buildings are on fire from a single image
+    
+    Args:
+        image_path: Path to input image
+        weights_path: Path to YOLO weights (best.pt)
+        device: 'cuda' or 'cpu'
+        conf_threshold: Confidence threshold for detection
+        img_size: Image size for inference (lower = faster on Jetson)
+    
+    Returns:
+        List[int]: List of building numbers on fire (1-9)
+    """
+    
+    FIRE_CLASS = 0
+    
+    model = YOLO(str(weights_path))
+    model.to(device)
+    
+    with torch.no_grad():
+        results = model.predict(
+            source=str(image_path),
+            conf=conf_threshold,
+            imgsz=img_size,
+            verbose=False,
+            device=device,
+            save=False
+        )
+    
+    result = results[0]
+    boxes_obj = result.boxes
+    
+    if boxes_obj is None or boxes_obj.data.numel() == 0:
+        return []
+    
+    xyxy = boxes_obj.xyxy.cpu().numpy()
+    cls_ids = boxes_obj.cls.cpu().numpy().astype(int)
+    
+    # --- Sector Mapping Logic (1-9) ---
+    
+    # Step 1: Find leftmost box as Sector 7 reference
+    ref_idx = int(np.argmin(xyxy[:, 0]))
+    ref_box = xyxy[ref_idx]
+    
+    ref_width = ref_box[2] - ref_box[0]
+    ref_height = ref_box[3] - ref_box[1]
+    
+    if ref_width <= 0 or ref_height <= 0:
+        return []
+    
+    x_limit = ref_box[0] + ref_width * 4.0
+    y_center = 0.5 * (ref_box[1] + ref_box[3])
+    y_half = ref_height * 1.5
+    y_min = max(0.0, y_center - y_half)
+    y_max = y_center + y_half
+    
+    sector_assignments = {7: ref_idx}
+    used_indices = {ref_idx}
+    
+    # Step 2: Find Sectors 6 and 8
+    candidates_68 = []
+    for idx, (x1, y1, x2, y2) in enumerate(xyxy):
+        if idx == ref_idx:
+            continue
+        center_x = 0.5 * (x1 + x2)
+        center_y = 0.5 * (y1 + y2)
+        
+        if (ref_box[0] <= center_x <= x_limit and 
+            y_min <= center_y <= y_max):
+            candidates_68.append((idx, center_y))
+    
+    if len(candidates_68) >= 2:
+        candidates_68.sort(key=lambda x: x[0])
+        selected_68 = [c[0] for c in candidates_68[:2]]
+        
+        centers_68 = {idx: (xyxy[idx, 1] + xyxy[idx, 3]) / 2.0 for idx in selected_68}
+        sector_assignments[6] = min(selected_68, key=lambda idx: centers_68[idx])
+        sector_assignments[8] = max(selected_68, key=lambda idx: centers_68[idx])
+        used_indices.update([sector_assignments[6], sector_assignments[8]])
+    
+    # Step 3: Find Sectors 5 and 9
+    candidates_59 = []
+    for idx, (x1, y1, x2, y2) in enumerate(xyxy):
+        if idx in used_indices:
+            continue
+        center_x = 0.5 * (x1 + x2)
+        center_y = 0.5 * (y1 + y2)
+        
+        if (ref_box[0] <= center_x and 
+            y_min <= center_y <= y_max):
+            candidates_59.append((idx, center_y))
+    
+    if len(candidates_59) >= 2:
+        candidates_59.sort(key=lambda x: x[1])
+        sector_assignments[5] = candidates_59[0][0]
+        sector_assignments[9] = candidates_59[-1][0]
+        used_indices.update([sector_assignments[5], sector_assignments[9]])
+    
+    # Step 4: Assign remaining boxes to Sectors 4, 3, 2, 1
+    remaining_indices = [idx for idx in range(len(xyxy)) if idx not in used_indices]
+    
+    if len(remaining_indices) >= 4:
+        centers_x = [(idx, 0.5 * (xyxy[idx, 0] + xyxy[idx, 2])) for idx in remaining_indices]
+        centers_x.sort(key=lambda x: x[1], reverse=True)
+        
+        sector_assignments[4] = centers_x[0][0]
+        sector_assignments[3] = centers_x[1][0]
+        sector_assignments[2] = centers_x[2][0]
+        sector_assignments[1] = centers_x[3][0]
+    
+    # --- Find Fire Buildings ---
+    
+    idx_to_sector = {idx: sector for sector, idx in sector_assignments.items()}
+    
+    fire_buildings = []
+    for idx, cls_id in enumerate(cls_ids):
+        if cls_id == FIRE_CLASS and idx in idx_to_sector:
+            building_num = idx_to_sector[idx]
+            fire_buildings.append(building_num)
+    
+    return sorted(set(fire_buildings))
