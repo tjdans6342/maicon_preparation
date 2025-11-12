@@ -26,8 +26,21 @@ from src.core.control.controller import Controller
 
 from src.configs.lane_config import LaneConfig
 
-from collections import deque
 
+
+#### video recoding
+
+from src.configs.video_config import VideoConfig
+from src.core.recording.video_recorder import VideoRecorder
+
+########
+
+
+
+    
+from collections import deque
+    
+    
 class Robot:
     """
     ✅ Robot Main Controller
@@ -55,7 +68,7 @@ class Robot:
             width=150,
             minpix=15,
 
-            slope_threshold=10,
+            slope_threshold=20,
             min_votes=50, #60,
 
             display_mode=True,
@@ -65,27 +78,26 @@ class Robot:
         
         # Control 설정값
         self.control_configs = {
-            # linear
             'default-setting': [0.05, 1.2, 1.0],
-            'basic:linear0.10': [0.1 * 1.0, 0.7 * 1.0, 0.7 * 1.0], 
-            'basic:linear0.15': [0.1 * 1.5, 0.7 * 1.5, 0.7 * 1.5],
-            'basic:linear0.20': [0.1 * 2.0, 0.7 * 2.0, 0.7 * 2.0],
-            'basic:linear0.30': [0.1 * 3.0, 0.7 * 3.0, 0.7 * 3.0],
+
+            # linear
+            'linear0.10': [0.1 * 1.0, 0.3 * 1.0, 0.3 * 1.0], 
+            'linear0.15': [0.1 * 1.5, 0.3 * 1.5, 0.3 * 1.5],
+            'linear0.20': [0.1 * 2.0, 0.3 * 2.0, 0.3 * 2.0],
+            'linear0.30': [0.1 * 3.0, 0.3 * 3.0, 0.3 * 3.0],
             'linear0.50': [0.1 * 5.0, 0.3 * 3.0, 0.3 * 3.0],
 
-             # safety
-            'basic:safety0.05':  [0.1 * 0.5, 0.7 * 3.0, 0.7 * 1.0], 
-            'basic:safety0.10': [0.1 * 1.0, 0.7 * 1.0, 0.7 * 1.0], # same 'basic:linear0.10'
-            'basic:safety0.20': [0.1 * 2.0, 0.7 * 2.0, 0.7 * 2.0], # same 'basic:linear0.20'
-
-           
-        
+            # curved
+            'curved0.10': [0.1 * 1.0, 0.7 * 1.0, 0.7 * 1.0], 
+            'curved0.15': [0.1 * 1.5, 0.7 * 1.5, 0.7 * 1.5],
+            'curved0.20': [0.1 * 2.0, 0.7 * 2.0, 0.7 * 2.0],
+            'curved0.30': [0.1 * 3.0, 0.7 * 3.0, 0.7 * 3.0],
         }
 
         best_combinations = [
-            ['basic:linear0.10', 'basic:curved0.10', 1],
-            ['basic:linear0.30', 'basic:curved0.10', 5],
-            ['linear0.50', 'basic:safety0.10', 20],
+            ['curved0.10', 'curved0.10', 1],
+            ['curved0.30', 'curved0.10', 5], # (abs(he) < 0.5)
+            ['linear0.50', 'curved0.10', 20], # (abs(he) < 0.5) and (abs(le) < 1.0)
         ]
 
         self.error_queue_size = 20 # can be tuned
@@ -93,8 +105,8 @@ class Robot:
             'heading': deque([0] * self.error_queue_size),
             'lat': deque([0] * self.error_queue_size),
         }
-        self.linear_option = self.control_configs['basic:safety0.10'] # can be tuned
-        self.curved_option = self.control_configs['basic:safety0.10'] # can be tuned
+        self.linear_option = self.control_configs['linear0.20'] # can be tuned
+        self.curved_option = self.control_configs['curved0.10'] # can be tuned
 
         self.base_speed, self.lat_weight, self.heading_weight = self.linear_option
 
@@ -111,8 +123,22 @@ class Robot:
 
         self.last_switch_time = rospy.get_time()
 
-        rospy.loginfo("✅ All subsystems initialized.")
         rospy.loginfo("Starting main control loop...")
+
+
+        ### video recoding
+
+            # Video Recording Module
+
+        video_cfg = VideoConfig()
+        self.video_recorder = VideoRecorder(config=video_cfg)
+        
+        # Start recording
+        self.video_recorder.start_recording()
+        
+        rospy.loginfo("✅ All subsystems initialized.")
+
+
 
     # -------------------------------------------------------
     #  차선 기반 주행 모드
@@ -128,15 +154,18 @@ class Robot:
         lateral_err = lane_info["offset"]
 
         # change mode (linear ↔ curved)
-        is_curved = False
+        is_linear = True
         for he, le in zip(self.error_queue['heading'], self.error_queue['lat']):
-            is_curved = is_curved or (abs(he) > 0.5) or (abs(le) > 1.0)
+            if not (abs(he) < 0.2):
+                is_linear = False
+                break
         
-        if is_curved: # curved mode
+        if is_linear: # linear mode
+            self.base_speed, self.lat_weight, self.heading_weight= self.linear_option 
+        else: # curved mode
             print("Passing Curved line!!")
             self.base_speed, self.lat_weight, self.heading_weight = self.curved_option
-        else: # linear mode
-            self.base_speed, self.lat_weight, self.heading_weight= self.linear_option            
+                       
 
         print("total_heading:", self.heading_weight * heading_err, "total_later:", self.lat_weight * lateral_err)
 
@@ -154,6 +183,20 @@ class Robot:
         print("cmd_ang: ", control)
 
         self.aruco.step()  # 아루코 액션 중이면 계속 실행 (이거 사실 필요 없을 거 같은데..)
+
+
+            # Add frame to video recorder
+
+        if self.lane.image is not None:
+            self.video_recorder.add_frame(self.lane.image)
+
+
+
+            # Add frame to video recorder
+
+        if self.lane.image is not None:
+            self.video_recorder.add_frame(self.lane.image)
+
 
     # -------------------------------------------------------
     #  화재 감지 모드
@@ -201,6 +244,11 @@ class Robot:
     # -------------------------------------------------------
     def run(self):
         rate = rospy.Rate(20)
+
+        #Register cleanup callback
+        
+        rospy.on_shutdown(self._cleanup)
+
         while not rospy.is_shutdown():
             self._check_mode_transition()
 
@@ -211,6 +259,12 @@ class Robot:
                 # ArucoTrigger 내부에서 step()이 액션 실행 중임
                 self.aruco.step()
 
+
+                # send video 
+
+                if self.lane.image is not None:
+                    self.video_recorder.add_frame(self.lane.image)
+
                 # 모두 끝나면 ArucoTrigger가 자동으로 LANE_FOLLOW 복귀
                 if self.aruco.mode == "LANE_FOLLOW":
                     self.mode = "LANE_FOLLOW"
@@ -220,6 +274,26 @@ class Robot:
             #     self._fire_mode()
 
             rate.sleep()
+
+    def _cleanup(self):
+        """
+        Cleanup resources on ROS shutdown
+        - Stop video recording
+        - Stop robot movement
+        """
+        rospy.loginfo("🛑 Robot shutting down...")
+        
+        # Stop video recording properly
+        if hasattr(self, 'video_recorder') and self.video_recorder.is_recording():
+            rospy.loginfo("[Cleanup] Stopping video recorder...")
+            self.video_recorder.stop_recording()
+        
+        # Stop robot movement
+        if hasattr(self, 'controller'):
+            rospy.loginfo("[Cleanup] Stopping robot...")
+            self.controller.stop()
+        
+        rospy.loginfo("✅ Cleanup complete")
 
 
 # -----------------------------------------------------------

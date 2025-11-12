@@ -205,6 +205,8 @@ class LaneDetector:
             minpix=self.cfg.minpix
         )
 
+        print(self.cfg.display_mode)
+
         if self.cfg.display_mode:
             lane_detected_img = self._visualize_lane_detection(
                 hough_img,
