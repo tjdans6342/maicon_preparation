@@ -36,6 +36,9 @@ from src.configs.lane_config import LaneConfig
 from src.configs.video_config import VideoConfig
 from src.core.recording.video_recorder import VideoRecorder
 
+#### lane analysis recording
+from src.core.recording.lane_analysis_recorder import LaneAnalysisRecorder
+
 ########
 
 ### fire detection
@@ -135,17 +138,16 @@ class Robot:
         rospy.loginfo("Starting main control loop...")
 
 
-        ### video recoding
+        ### video recording (original camera feed)
 
-            # Video Recording Module
-
-        # video_cfg = VideoConfig()
-        # self.video_recorder = VideoRecorder(config=video_cfg)
+        # Video Recording Module
+        video_cfg = VideoConfig()
+        self.video_recorder = VideoRecorder(config=video_cfg)
         
-        # # Start recording
-        # self.video_recorder.start_recording()
+        # Start recording
+        self.video_recorder.start_recording()
         
-        # rospy.loginfo("✅ All subsystems initialized.")
+        rospy.loginfo("✅ Video recorder initialized.")
 
 
         ### fire detection
@@ -160,6 +162,15 @@ class Robot:
         self.detected_fire_buildings = []
         
         rospy.loginfo("✅ Fire detector initialized.")
+
+
+        ### lane analysis recording
+        
+        # Initialize lane analysis recorder
+        self.lane_analysis_recorder = LaneAnalysisRecorder()
+        self.lane_analysis_recorder.start_recording()
+        
+        rospy.loginfo("✅ Lane analysis recorder initialized.")
 
 
 
@@ -208,18 +219,14 @@ class Robot:
 
         self.aruco.step()  # 아루코 액션 중이면 계속 실행 (이거 사실 필요 없을 거 같은데..)
 
+        # Add frame to original video recorder
+        if self.lane.image is not None:
+            self.video_recorder.add_frame(self.lane.image)
 
-            # Add frame to video recorder
-
-        # if self.lane.image is not None:
-        #     self.video_recorder.add_frame(self.lane.image)
-
-
-
-            # Add frame to video recorder
-
-        # if self.lane.image is not None:
-        #     self.video_recorder.add_frame(self.lane.image)
+        # Add pipeline frames to lane analysis recorder
+        pipeline_images = self.lane.get_pipeline_images()
+        if pipeline_images:
+            self.lane_analysis_recorder.add_pipeline_frame(pipeline_images)
 
 
     # -------------------------------------------------------
@@ -283,9 +290,8 @@ class Robot:
             rospy.loginfo("✅ No fire detected, starting normal operation")
         
 
-        #Register cleanup callback
-        
-        # rospy.on_shutdown(self._cleanup)
+        # Register cleanup callback
+        rospy.on_shutdown(self._cleanup)
 
         while not rospy.is_shutdown():
             self._check_mode_transition()
@@ -297,11 +303,9 @@ class Robot:
                 # ArucoTrigger 내부에서 step()이 액션 실행 중임
                 self.aruco.step()
 
-
-                # send video 
-
-                # if self.lane.image is not None:
-                #     self.video_recorder.add_frame(self.lane.image)
+                # Send video frame during ARUCO mode
+                if self.lane.image is not None:
+                    self.video_recorder.add_frame(self.lane.image)
 
                 # 모두 끝나면 ArucoTrigger가 자동으로 LANE_FOLLOW 복귀
                 if self.aruco.mode == "LANE_FOLLOW":
@@ -372,6 +376,7 @@ class Robot:
         """
         Cleanup resources on ROS shutdown
         - Stop video recording
+        - Stop lane analysis recording
         - Stop robot movement
         """
         rospy.loginfo("🛑 Robot shutting down...")
@@ -380,6 +385,11 @@ class Robot:
         if hasattr(self, 'video_recorder') and self.video_recorder.is_recording():
             rospy.loginfo("[Cleanup] Stopping video recorder...")
             self.video_recorder.stop_recording()
+        
+        # Stop lane analysis recording
+        if hasattr(self, 'lane_analysis_recorder') and self.lane_analysis_recorder.is_recording():
+            rospy.loginfo("[Cleanup] Stopping lane analysis recorder...")
+            self.lane_analysis_recorder.stop_recording()
         
         # Stop robot movement
         if hasattr(self, 'controller'):

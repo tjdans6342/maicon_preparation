@@ -12,10 +12,10 @@ class VideoConfig:
 
     def __init__(self):
         # Enable/disable recording
-        self.enabled = False
+        self.enabled = True  # Set to True to enable video recording
         
         # Output directory for videos
-        self.output_dir = os.path.expanduser("/home/r1mini/Desktop/tmp/maicon_preparation/robot_videos")
+        self.output_dir = "robot_videos"  # Changed to relative path
         
         # Video settings
         self.fps = 15  # Frames per second
