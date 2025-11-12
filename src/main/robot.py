@@ -7,7 +7,9 @@ DARK_HLS = [[0, 0, 0], [180, 140, 200]] # 기존에 했던 값
 # WHITE_HLS = [(0, 150, 0), (180, 255, 255)] # white line night_area1
 # WHITE_HLS = [(0, 120, 0), (180, 255, 255)] # white line 2139_area1
 
-WHITE_HLS = [(0, 180, 0), (180, 255, 255)] # white line 1020_2area
+
+WHITE_HLS = [(0, 140, 0), (180, 255, 255)] # white line 1213_area2
+# WHITE_HLS = [(0, 180, 0), (180, 255, 255)] # white line 1020_area2 (not~~~)
 
 YELLOW_HLS = [(20, 70, 12), (40, 130, 110)] # yellow line
 
@@ -73,7 +75,7 @@ class Robot:
             min_votes=50, #60,
 
             display_mode=True,
-            image_names=["Original", "BEV", "Filtered", "Canny", "Hough", "Lane Detection"]
+            image_names=["Original", "BEV", "Filtered"] #, "Canny", "Hough", "Lane Detection"]
             # "Original", "BEV", "Filtered":, "gray", "Blurred", "binary", "Canny", "Hough", "Lane Detection"
         )
         
@@ -106,8 +108,8 @@ class Robot:
             'heading': deque([0] * self.error_queue_size),
             'lat': deque([0] * self.error_queue_size),
         }
-        self.linear_option = self.control_configs['linear0.30'] # can be tuned
-        self.curved_option = self.control_configs['curved0.20'] # can be tuned
+        self.linear_option = self.control_configs['linear0.10'] # can be tuned
+        self.curved_option = self.control_configs['curved0.10'] # can be tuned
 
         self.base_speed, self.lat_weight, self.heading_weight = self.linear_option
 
@@ -131,13 +133,13 @@ class Robot:
 
             # Video Recording Module
 
-        video_cfg = VideoConfig()
-        self.video_recorder = VideoRecorder(config=video_cfg)
+        # video_cfg = VideoConfig()
+        # self.video_recorder = VideoRecorder(config=video_cfg)
         
-        # Start recording
-        self.video_recorder.start_recording()
+        # # Start recording
+        # self.video_recorder.start_recording()
         
-        rospy.loginfo("✅ All subsystems initialized.")
+        # rospy.loginfo("✅ All subsystems initialized.")
 
 
 
@@ -188,15 +190,15 @@ class Robot:
 
             # Add frame to video recorder
 
-        if self.lane.image is not None:
-            self.video_recorder.add_frame(self.lane.image)
+        # if self.lane.image is not None:
+        #     self.video_recorder.add_frame(self.lane.image)
 
 
 
             # Add frame to video recorder
 
-        if self.lane.image is not None:
-            self.video_recorder.add_frame(self.lane.image)
+        # if self.lane.image is not None:
+        #     self.video_recorder.add_frame(self.lane.image)
 
 
     # -------------------------------------------------------
@@ -228,7 +230,6 @@ class Robot:
         # --- 아루코 상태 확인 ---
         if self.aruco.mode == "EXECUTE_ACTION":
             self.mode = "ARUCO"
-            print("ARUCO MODE CHANGE!!")
             return
 
         elif self.aruco.mode == "LANE_FOLLOW":
@@ -249,7 +250,7 @@ class Robot:
 
         #Register cleanup callback
         
-        rospy.on_shutdown(self._cleanup)
+        # rospy.on_shutdown(self._cleanup)
 
         while not rospy.is_shutdown():
             self._check_mode_transition()
@@ -264,8 +265,8 @@ class Robot:
 
                 # send video 
 
-                if self.lane.image is not None:
-                    self.video_recorder.add_frame(self.lane.image)
+                # if self.lane.image is not None:
+                #     self.video_recorder.add_frame(self.lane.image)
 
                 # 모두 끝나면 ArucoTrigger가 자동으로 LANE_FOLLOW 복귀
                 if self.aruco.mode == "LANE_FOLLOW":

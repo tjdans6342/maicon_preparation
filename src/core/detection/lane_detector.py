@@ -41,7 +41,7 @@ class LaneDetector:
             }
         else:
             self.error_queue = error_queue
-
+            
         rospy.loginfo("📷 LaneDetector subscribed to {}".format(image_topic))
 
     # -------------------------------------------------------

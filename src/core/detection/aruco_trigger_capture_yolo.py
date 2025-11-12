@@ -77,11 +77,11 @@ class ArucoTrigger(object):
             # 2: {1: ("right", 90)},
             # # id=3 마커: 1번째 등장 -> 왼쪽 90도 회전 후 일반 이미지 캡처, 2번째 등장 -> 오른쪽 90도 회전
             # 3: {1: [("left", 90), ("capture", 0)], 2: ("right", 90)},
-            3: {1: [("left", 90)], 2: [],},
+            3: {1: [("left", 90)], 2: [("left", 0)],},
             # # id=4 마커: 2번째 등장 -> 왼쪽 90도 회전
-            4: {1: [("right", 90)], 2: [("left", 90)]},
-            5: {1: [("right", 90)], 2: [("left", 90)]},
-            10: {1: [], 2: [("right", 90)]},
+            4: {1: ("right", 90), 2: ("left", 90)},
+            5: {1: ("right", 90), 2: [("left", 90)]},
+            10: {1: [("right", 90)]},
 
         }
 
@@ -100,9 +100,9 @@ class ArucoTrigger(object):
         # 마커 트리거 쿨다운 설정 (동일 마커가 연속해서 트리거되지 않도록)
         self.cooldown_default = 5.0  # 기본 쿨다운 시간 (초)
         self.cooldown_per_id = {
-            0: 6.5, 
-            2: 1.0, 
-            4: 3.0,
+            0: 6.5,
+            2: 1.0,
+            4: 8.0,
             5: 5.0,
             10: 10.0
         }  # ID별 개별 쿨다운 시간
@@ -130,7 +130,7 @@ class ArucoTrigger(object):
         self._last_marker_id = None
 
         # 노이즈 제거를 위한 연속 프레임 요구 횟수
-        self.required_consecutive = 3
+        self.required_consecutive = 1
         # 각 마커ID별 현재 연속 만족 프레임 횟수
         self._consec = {}
 
@@ -195,7 +195,7 @@ class ArucoTrigger(object):
 
         # LANE_FOLLOW 모드가 아니라면 트리거 처리 없이 종료
         if self.mode != "LANE_FOLLOW":
-            return
+            return False
 
         now = time.time()
         # 현재 프레임에서 ArUco 마커 검출
@@ -204,7 +204,7 @@ class ArucoTrigger(object):
             # 마커 없으면 연속 감지 카운트 초기화
             self._consec = {}
             self._last_marker_id = None
-            return
+            return False
 
         # 유효성 조건(_gate)에 맞는 마커만 필터링
         dets = [d for d in dets if self._gate(d)]
@@ -212,7 +212,7 @@ class ArucoTrigger(object):
             # 조건 만족 마커 없으면 초기화 후 종료
             self._consec = {}
             self._last_marker_id = None
-            return
+            return False
 
         # 가장 큰 마커 하나 선택 (면적이 가장 큰 것)
         det = max(dets, key=lambda x: x["area"])
@@ -229,13 +229,13 @@ class ArucoTrigger(object):
 
         # 설정한 연속 프레임 횟수 미만이면 트리거하지 않고 대기
         if self._consec[mid] < self.required_consecutive:
-            return
+            return False
 
         # 쿨다운 체크: 마지막 트리거 시각과 비교
         last = self.last_trigger_times.get(mid, 0.0)
         cooldown = self.cooldown_per_id.get(mid, self.cooldown_default)
         if (now - last) < cooldown:
-            return
+            return False
 
         # 등장 횟수(nth) 갱신
         nth = self.seen_counts.get(mid, 0) + 1
@@ -244,6 +244,7 @@ class ArucoTrigger(object):
         # 규칙에 해당 (marker id와 nth 조합)하는 액션이 정의되어 있다면 실행
         if mid in self.rules and nth in self.rules[mid]:
             actions = self.rules[mid][nth]
+            print("actoions info:", mid, nth)
             if isinstance(actions, tuple):
                 actions = [actions]
             # pending_actions 리스트에 액션들 저장하고 모드 전환
@@ -253,6 +254,9 @@ class ArucoTrigger(object):
             self.last_trigger_times[mid] = now
             # 연속 카운트 리셋 (다음 트리거 대비)
             self._consec = {}
+            return True
+
+        return False
 
     # _rotate_in_place: 주어진 방향과 각도로 로봇을 제자리 회전
     def _rotate_in_place(self, direction, degrees, ang_speed=1.0):
