@@ -75,26 +75,28 @@ class ArucoTrigger(object):
             },
             2: {
                 1: [("drive", 0.3, 0.2111), ("right", 90)],
-                2: [("left", 20), ("drive", 0.5, 0.2111), ("left", 90)],
+                2: [("left", 0), ("drive", 0.5, 0.2111), ("left", 90)],
             },
             3: {
-                1: [("drive", 0.35, 0.2111), ("left", 90)], 
-                2: [("left", 0)],
+                1: [("drive", 0.4, 0.2111), ("left", 90)], 
+                2: [("left", 0)], 
+                3: [("drive", 0.45, 0.2111), ("right", 90)],
             },
             # 4: {
                 # 1: [("drive", 0.3, 0.2111), ("right", 90)], 
                 # 2: [("drive", 0.2, 0.2111), ("left", 90)],
             # },
             5: {
-                1: [("drive", 0.3, 0.2111), ("right", 90)], 
-                2: [("drive", 0.3, 0.2111), ("left", 90)],
+                1: [("drive", 0.4, 0.2111), ("right", 90)], 
+                2: [("drive", 0.4, 0.2111), ("left", 90)],
             },
-            10: {
-                1: [("drive", 0.25, 0.2111), ("right", 90)],
-            },
+            # 10: {
+            #     1: [("drive", 0.25, 0.2111), ("right", 90)],
+            # },
             "pothole": {  # 🔸 포트홀 감지 시 트리거할 규칙
                 # 1: [("circle", 0.3, 1.0, 0.1, "left"), ("drive", 0.2, 0.15)]
-                1: [("circle", 0.3, 0.1, 0.1, "left")],
+                1: [("drive", 0.00, 0.2111), ("right", 90), ("circle", 0.30, 1.0, 0.2, "left"), ("right", 90)],
+                # 2: [("right", 90), ("circle", 0.3, 1.0, 0.1, "left"), ("right", 90)],
             }
         }
 
@@ -275,35 +277,38 @@ class ArucoTrigger(object):
         """
         포트홀 감지 함수
         - 입력: 이진 이미지 (0 또는 255)
-        - 조건: 하단 70% 영역의 모든 픽셀이 0인 상태가 3프레임 연속이면 포트홀로 판정
+        - 조건: 하단 70% 영역의 모든 픽셀이 0인 상태가 k프레임 연속이면 포트홀로 판정
         """
         if binary_img is None or not isinstance(binary_img, np.ndarray):
             return False
 
         h, w = binary_img.shape[:2]
-        lower_region = binary_img[int(h * 0.3):, :]  # 하단 70% 영역
+        lower_region = binary_img[int(h * 0.7):, :]  # 하단 70% 영역
+
+        higher_region = binary_img[:int(h*0.3), :] # top 30% 영역
 
         # 완전히 검정색 여부 판단 (모든 픽셀 == 0)
-        is_black = np.all(lower_region == 0)
+        is_pothole = np.all(lower_region == 0) and (not np.all(higher_region == 0))
+
 
         # 상태 버퍼 초기화
+        buffer_size = 10
         if not hasattr(self, "_pothole_buffer"):
-            self._pothole_buffer = [False, False, False]
+            self._pothole_buffer = [False] * buffer_size
 
         # 최신 상태 추가 (FIFO)
         self._pothole_buffer.pop(0)
-        self._pothole_buffer.append(is_black)
+        self._pothole_buffer.append(is_pothole)
 
-        # 3프레임 연속 검정이면 True 반환
+        # buffer_size 프레임 연속 검정이면 True 반환
         detected = all(self._pothole_buffer)
 
         if detected:
-            rospy.loginfo("[ArucoTrigger] 🕳️ Pothole detected! (3 consecutive black frames)")
+            rospy.loginfo("[ArucoTrigger] 🕳️ Pothole detected! ({} consecutive black frames)".format(buffer_size))
             # 검출 이후 버퍼 초기화 (중복 방지)
-            self._pothole_buffer = [False, False, False]
+            del self._pothole_buffer
 
         return detected
-
 
     # _rotate_in_place: 주어진 방향과 각도로 로봇을 제자리 회전
     def _rotate_in_place(self, direction, degrees, ang_speed=1.0):
@@ -369,51 +374,65 @@ class ArucoTrigger(object):
 
     def _drive_circle(self, diameter=0.3, curvature=1.0, speed=0.1, arrow="left"):
         """
-            포트홀 회피용 반원형 주행 동작 (곡률 기반 기하학적 계산)
-            - curvature = 1 / R (반지름 R의 역수)
-            - curvature=1.0 → 반지름=1.0m, 반원 주행
-            - curvature=0.5 → 반지름=2.0m, 더 완만한 반원
+        포트홀 회피용 반원형 주행 동작 (곡률 기반 기하학적 계산)
+        - diameter: 회피 경로의 지름 (m)
+        - curvature: 곡률 (1.0 → 정확한 반원, 0.5 → 완만한 곡선)
+        - speed: 주행 속도 (m/s)
+        - arrow: 회전 방향 ("left" or "right")
         """
         rate = rospy.Rate(20)
+        curvature += np.finfo(float).eps
 
-        # 회전 방향에 따라 부호 설정
+        # 회전 방향 부호
         sign = 1.0 if arrow == "left" else -1.0
 
-        # ① 곡률 기반 각속도 계산
-        #    ω = v * curvature
-        angular_speed = sign * (speed * curvature)
 
-        # ② 반원 주행 시간 계산
-        #    반원의 길이 = π * R = π / curvature
-        #    시간 = 거리 / 속도 = (π / curvature) / v
-        duration = (math.pi / curvature) / speed
+        # ① 실제 반지름 계산
+        # curvature가 1.0이면 완전 반원, 0.5면 2배 더 큰 원(곡률이 작을수록 완만)
+        # R = (diameter / 2.0) / (curvature + 0.0000001)
+        R = (1.0 / curvature) * (diameter / 2.0)
+
+
+        # ② 각속도(ω = v / R)
+        angular_speed = sign * (speed / R)
+
+
+        # ③ 반원 주행 시간 계산 (arc_length = πR)
+        # arc_length = math.pi * R
+        arc_length = math.pi * diameter / 2.0
+        duration = arc_length / speed
+
 
         rospy.loginfo(
-            "[ArucoTrigger] Circular avoidance start: dir={}, curv={}, R={:.2f}m, duration={:.2f}s".format(arrow, curvature, 1/curvature, duration)
+            "[ArucoTrigger] Circular avoidance start: dir={}, diam={}, curv={}, R={:.3f}m, duration={:.2f}s".format(arrow, diameter, curvature, R, duration)
         )
+
 
         msg = Twist()
         msg.linear.x = speed
         msg.angular.z = angular_speed
+
 
         t_start = rospy.Time.now().to_sec()
         while (rospy.Time.now().to_sec() - t_start) < duration and not rospy.is_shutdown():
             self.drive_pub.publish(msg)
             rate.sleep()
 
-        # ③ 복귀 회전 (역방향 반원)
-        rospy.loginfo("[ArucoTrigger] Returning to original heading...")
 
-        msg.angular.z = -angular_speed  # 반대 방향으로 동일 각속도
-        t2 = rospy.Time.now().to_sec()
-        while (rospy.Time.now().to_sec() - t2) < duration and not rospy.is_shutdown():
-            self.drive_pub.publish(msg)
-            rate.sleep()
-
-        # ④ 정지
+        # ④ 종료 (정지)
         self.drive_pub.publish(Twist())
-        rospy.sleep(0.1)  # 🔸 0.1초 정도 잠깐 정지 유지 (덜컥 방지)
-        rospy.loginfo("[ArucoTrigger] Finished half-circle avoidance ({}), curvature={}".format(arrow, curvature))
+        rospy.sleep(0.1)  # 🔸 짧은 완충 시간 (덜컥 방지)
+        rospy.loginfo("[ArucoTrigger] Finished circular avoidance ({}), curvature={}".format(arrow, curvature))
+
+
+
+
+
+
+
+
+
+
 
 
 

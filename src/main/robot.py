@@ -8,7 +8,8 @@ DARK_HLS = [[0, 0, 0], [180, 140, 200]] # 기존에 했던 값
 # WHITE_HLS = [(0, 120, 0), (180, 255, 255)] # white line 2139_area1
 
 
-WHITE_HLS = [(0, 140, 0), (180, 255, 255)] # white line 1213_area2
+# WHITE_HLS = [(0, 140, 0), (180, 255, 255)] # white line 1213_area2
+WHITE_HLS = [(0, 140, 0), (180, 255, 255)] # white line 1653_area2
 # WHITE_HLS = [(0, 180, 0), (180, 255, 255)] # white line 1020_area2 (not~~~)
 
 YELLOW_HLS = [(20, 70, 12), (40, 130, 110)] # yellow line
@@ -75,7 +76,7 @@ class Robot:
             min_votes=50, #60,
 
             display_mode=True,
-            image_names=["Original", "BEV", "Filtered"] #, "Canny", "Hough", "Lane Detection"]
+            image_names=["Original", "BEV", "Filtered", "Canny", "Hough", "Lane Detection"]
             # "Original", "BEV", "Filtered":, "gray", "Blurred", "binary", "Canny", "Hough", "Lane Detection"
         )
         
@@ -108,8 +109,8 @@ class Robot:
             'heading': deque([0] * self.error_queue_size),
             'lat': deque([0] * self.error_queue_size),
         }
-        self.linear_option = self.control_configs['linear0.10'] # can be tuned
-        self.curved_option = self.control_configs['curved0.10'] # can be tuned
+        self.linear_option = self.control_configs['linear0.15'] # can be tuned
+        self.curved_option = self.control_configs['curved0.15'] # can be tuned
 
         self.base_speed, self.lat_weight, self.heading_weight = self.linear_option
 
@@ -230,8 +231,9 @@ class Robot:
                 self.aruco.observe_and_maybe_trigger(frame)
 
         # --- 포트홀 감지 (임시 로직, 추후 YOLO로 교체 가능) ---
-        if self.mode == "LANE_FOLLOW" and self.lane.image_dict['Hough'] is not None:
-            pothole_detected = self.aruco.observe_pothole(self.lane.image_dict['Hough'])
+        image_name = "binary"
+        if self.mode == "LANE_FOLLOW" and self.lane.image_dict[image_name] is not None:
+            pothole_detected = self.aruco.observe_pothole(self.lane.image_dict[image_name])
             if pothole_detected:
                 rospy.loginfo("[Robot] 🕳️ Pothole detected! Triggering avoidance.")
                 self.aruco.pending_actions = list(self.aruco.rules["pothole"][1])
