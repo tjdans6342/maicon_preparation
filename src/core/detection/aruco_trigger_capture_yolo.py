@@ -72,16 +72,26 @@ class ArucoTrigger(object):
         self.rules = {
             # id=0 마커: 1번째 등장 -> 오른쪽 90도 회전, 2번째 등장 -> 오른쪽 20도 회전 후 YOLO 이미지 캡처
             # 0: {1: [("right", 90), ("left", 90)], 2: [("right", 20), ("yolo_capture", 0)]},
-            0: {1: [("right", 90), ("left", 90)]},
+            0: {
+                1: [("right", 90), ("left", 90)]
+            },
             # # id=2 마커: 1번째 등장 -> 오른쪽 90도 회전
             # 2: {1: ("right", 90)},
             # # id=3 마커: 1번째 등장 -> 왼쪽 90도 회전 후 일반 이미지 캡처, 2번째 등장 -> 오른쪽 90도 회전
             # 3: {1: [("left", 90), ("capture", 0)], 2: ("right", 90)},
-            3: {1: [("left", 90)], 2: [("left", 0)],},
+            3: {
+                1: [("left", 90)], 2: [("left", 0)],
+            },
             # # id=4 마커: 2번째 등장 -> 왼쪽 90도 회전
-            4: {1: ("right", 90), 2: ("left", 90)},
-            5: {1: ("right", 90), 2: [("left", 90)]},
-            10: {1: [("right", 90)]},
+            4: {
+                1: ("right", 90), 2: [("drive", 1.0, 0.1), ("left", 90)],
+            },
+            5: {
+                1: ("right", 90), 2: [("left", 90)]
+            },
+            10: {
+                1: [("right", 90)]
+            },
 
         }
 
@@ -292,6 +302,35 @@ class ArucoTrigger(object):
         # 회전 종료 후 정지 명령 한 번 퍼블리시
         self.drive_pub.publish(Twist())
 
+    def _drive_distance(self, distance=1.0, speed=0.1):
+        """
+            지정한 거리(m)만큼 지정 속도(m/s)로 직진 주행하는 함수.
+
+            Parameters
+            ----------
+            distance : float
+                이동할 거리 (단위: m)
+            speed : float
+                주행 속도 (단위 : m/s)
+        """
+        msg = Twist()
+        msg.linear.x = speed
+        msg.angular.z = 0.0
+
+        rate = rospy.Rate(20)  # 20Hz 퍼블리시
+        start_time = rospy.Time.now().to_sec()
+        duration = abs(distance / speed)  # 이동에 필요한 시간
+
+        # 지정된 시간 동안 속도 명령 퍼블리시
+        while (rospy.Time.now().to_sec() - start_time) < duration and not rospy.is_shutdown():
+            self.drive_pub.publish(msg)
+            rate.sleep()
+
+        # 정지 명령
+        self.drive_pub.publish(Twist())
+        rospy.loginfo(f"[ArucoTrigger] Drove {distance:.2f}m at {speed:.2f}m/s")
+
+
     # step: EXECUTE_ACTION 모드에서 pending_actions의 액션들을 순차적으로 실행
     def step(self):
         if self.mode == "EXECUTE_ACTION" and self.pending_actions:
@@ -300,16 +339,25 @@ class ArucoTrigger(object):
             rospy.sleep(0.15)
 
             # 실행할 액션 하나 꺼내기
-            direction, deg = self.pending_actions.pop(0)
+            action = self.pending_actions.pop(0)
+
+            # --- 인자 언패킹 (길이에 따라 자동 처리) ---
+            direction = action[0]
+            args = action[1:]
+            # ---------------------------------------
             if direction == "capture":
-                # 일반 캡처 액션
                 self._capture_image()
             elif direction == "yolo_capture":
-                # YOLO 추론용 캡처 액션
                 self._capture_yolo_image()
+            elif direction == "drive":
+                # drive_distance(distance, speed)
+                distance = args[0] if len(args) >= 1 else 1.0
+                speed = args[1] if len(args) >= 2 else 0.1
+                self._drive_distance(distance=distance, speed=speed)
             else:
-                # 회전 액션의 경우 (오른쪽/왼쪽/turn 등)
-                self._rotate_in_place(direction, deg, ang_speed=1.0)
+                # 회전 관련 명령 (오른쪽, 왼쪽, turn 등)
+                degrees = args[0] if len(args) >= 1 else 90.0
+                self._rotate_in_place(direction, degrees, ang_speed=1.0)
 
             # 모든 액션을 끝마치면 모드를 LANE_FOLLOW로 복귀
             if not self.pending_actions:
