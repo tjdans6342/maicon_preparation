@@ -42,7 +42,17 @@ class LaneDetector:
         else:
             self.error_queue = error_queue
             
-        self.image_dict = {}
+        self.image_dict = {
+            "Original": None,
+            "BEV": None,
+            "Filtered": None,
+            "gray": None,
+            "Blurred": None,
+            "binary": None,
+            "Canny": None,
+            "Hough": None,
+            "Lane Detection": None
+        }
 
         rospy.loginfo("📷 LaneDetector subscribed to {}".format(image_topic))
 

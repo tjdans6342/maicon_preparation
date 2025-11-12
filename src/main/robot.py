@@ -108,8 +108,8 @@ class Robot:
             'heading': deque([0] * self.error_queue_size),
             'lat': deque([0] * self.error_queue_size),
         }
-        self.linear_option = self.control_configs['linear0.30'] # can be tuned
-        self.curved_option = self.control_configs['curved0.20'] # can be tuned
+        self.linear_option = self.control_configs['linear0.10'] # can be tuned
+        self.curved_option = self.control_configs['curved0.10'] # can be tuned
 
         self.base_speed, self.lat_weight, self.heading_weight = self.linear_option
 
