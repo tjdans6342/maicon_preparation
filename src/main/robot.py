@@ -76,7 +76,7 @@ class Robot:
             min_votes=50, #60,
 
             display_mode=True,
-            image_names=["Original", "BEV", "Filtered", "Canny", "Hough", "Lane Detection"]
+            image_names=["Original", "BEV", "Filtered", "Canny"] #, "Hough", "Lane Detection"]
             # "Original", "BEV", "Filtered":, "gray", "Blurred", "binary", "Canny", "Hough", "Lane Detection"
         )
         
@@ -226,9 +226,8 @@ class Robot:
         # --- 아루코 감지 먼저 실행 ---
         if self.mode == "LANE_FOLLOW":
             frame = self.lane.image
-            if frame is not None:
-                # pass
-                self.aruco.observe_and_maybe_trigger(frame)
+            # if frame is not None:
+            #     self.aruco.observe_and_maybe_trigger(frame)
 
             # --- 포트홀 감지 (임시 로직, 추후 YOLO로 교체 가능) ---
             image_name = "binary"
@@ -244,7 +243,7 @@ class Robot:
                 nth = self.aruco.observe_pothole(self.lane.image_dict[image_name])
 
                 if nth:
-                    rospy.loginfo(f"[Robot] 🕳️ Pothole detected! nth={nth}")
+                    rospy.loginfo("[Robot] 🕳️ Pothole detected! nth={}".format(nth))
 
                     actions = self.aruco.rules["pothole"].get(nth)
                     if actions:

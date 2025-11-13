@@ -12,6 +12,7 @@ class VideoConfig:
 
     def __init__(self):
         # Enable/disable recording
+        # self.enabled = True
         self.enabled = False
         
         # Output directory for videos

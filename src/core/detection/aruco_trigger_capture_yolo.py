@@ -95,8 +95,8 @@ class ArucoTrigger(object):
             # },
             "pothole": {  # 🔸 포트홀 감지 시 트리거할 규칙
                 # 1: [("circle", 0.3, 1.0, 0.1, "left"), ("drive", 0.2, 0.15)]
-                1: [("drive", 0.00, 0.2111), ("right", 90), ("circle", 0.30, 1.0, 0.2, "left"), ("right", 90)],
-                2: [("drive", 0.00, 0.2111), ("left", 90), ("circle", 0.30, 1.0, 0.2, "right"), ("left", 90)],
+                1: [("drive", 0.05, 0.2111), ("right", 90), ("circle", 0.30, 1.0, 0.2, "left"), ("right", 90)],
+                2: [("drive", 0.05, 0.2111), ("left", 90), ("circle", 0.30, 1.0, 0.2, "right"), ("left", 90)],
             }
         }
 
@@ -290,16 +290,31 @@ class ArucoTrigger(object):
             return False
 
         h, w = binary_img.shape[:2]
-        lower = binary_img[int(h*0.7):, :]
-        upper = binary_img[:int(h*0.3), :]
+        # lower = binary_img[int(h*0.7):, :]
+        # upper = binary_img[:int(h*0.3), :]
 
-        is_black = np.all(lower == 0) and (not np.all(upper == 0))
+        # check pothole condition
+        top_side_area1 = binary_img[:int(h*0.3), int(0.1*w):]
+        top_side_area2 = binary_img[:int(h*0.3), :int(0.9*w)]
+        top_center_area = binary_img[:int(h*0.3), int(0.2*w):int(0.8*w)]
+        mid_area = binary_img[int(h*0.5):int(h*0.7), :]
 
+        white_cnt = np.sum(top_center_area == 255)
+        
+        total = top_center_area.size
+        white_per = np.float(white_cnt) / np.float(total)
+        # black_per = (total - white_cnt) / total
+
+        print(total, white_cnt, white_per, (mid_area.max() == 0))
+
+        is_pothole = (white_per > 0.1) and (mid_area.max() == 0 and top_side_area1.max() == 0 and top_side_area2.max() == 0)
+
+        buffer_size = 1
         if not hasattr(self, "_pothole_buffer"):
-            self._pothole_buffer = [False] * 10
+            self._pothole_buffer = [False] * buffer_size
 
         self._pothole_buffer.pop(0)
-        self._pothole_buffer.append(is_black)
+        self._pothole_buffer.append(is_pothole)
 
         detected = all(self._pothole_buffer)
 
@@ -312,7 +327,7 @@ class ArucoTrigger(object):
         self.pothole_seen_count += 1
         nth = self.pothole_seen_count
 
-        rospy.loginfo(f"[ArucoTrigger] Pothole detected! nth={nth}")
+        rospy.loginfo("[ArucoTrigger] Pothole detected! nth={}".format(nth))
 
         self.pothole_last_trigger = now
         del self._pothole_buffer
