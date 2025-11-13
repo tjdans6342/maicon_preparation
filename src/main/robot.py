@@ -226,8 +226,8 @@ class Robot:
         # --- 아루코 감지 먼저 실행 ---
         if self.mode == "LANE_FOLLOW":
             frame = self.lane.image
-            # if frame is not None:
-            #     self.aruco.observe_and_maybe_trigger(frame)
+            if frame is not None:
+                self.aruco.observe_and_maybe_trigger(frame)
 
             # --- 포트홀 감지 (임시 로직, 추후 YOLO로 교체 가능) ---
             image_name = "binary"

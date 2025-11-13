@@ -87,16 +87,19 @@ class ArucoTrigger(object):
                 # 2: [("drive", 0.2, 0.2111), ("left", 90)],
             # },
             5: {
-                1: [("drive", 0.4, 0.2111), ("right", 90)], 
-                2: [("drive", 0.4, 0.2111), ("left", 90)],
+                # 1: [("drive", 0.4, 0.2111), ("right", 90)], 
+                # 2: [("drive", 0.4, 0.2111), ("left", 90)],
+                1: [("drive", 0.35, 0.2111), ("right", 90)], 
+                2: [("drive", 0.35, 0.2111), ("left", 90)],
             },
             # 10: {
             #     1: [("drive", 0.25, 0.2111), ("right", 90)],
             # },
             "pothole": {  # 🔸 포트홀 감지 시 트리거할 규칙
                 # 1: [("circle", 0.3, 1.0, 0.1, "left"), ("drive", 0.2, 0.15)]
-                1: [("drive", 0.05, 0.2111), ("right", 90), ("circle", 0.30, 1.0, 0.2, "left"), ("right", 90)],
-                2: [("drive", 0.05, 0.2111), ("left", 90), ("circle", 0.30, 1.0, 0.2, "right"), ("left", 90)],
+                1: [("drive", 0.00, 0.2111), ("right", 90), ("circle", 0.30, 1.0, 0.2, "left"), ("right", 90)],
+                2: [("drive", 0.00, 0.2111), ("right", 90), ("circle", 0.30, 1.0, 0.2, "left"), ("right", 90)],
+                3: [("drive", 0.00, 0.2111), ("left", 90), ("circle", 0.30, 1.0, 0.2, "right"), ("left", 90)],
             }
         }
 
@@ -294,9 +297,9 @@ class ArucoTrigger(object):
         # upper = binary_img[:int(h*0.3), :]
 
         # check pothole condition
-        top_side_area1 = binary_img[:int(h*0.3), int(0.1*w):]
-        top_side_area2 = binary_img[:int(h*0.3), :int(0.9*w)]
-        top_center_area = binary_img[:int(h*0.3), int(0.2*w):int(0.8*w)]
+        top_side_area1 = binary_img[:int(h*0.3), :int(0.1*w)]
+        top_side_area2 = binary_img[:int(h*0.3), int(0.9*w):]
+        top_center_area = binary_img[:int(h*0.15), int(0.2*w):int(0.8*w)]
         mid_area = binary_img[int(h*0.5):int(h*0.7), :]
 
         white_cnt = np.sum(top_center_area == 255)
@@ -305,11 +308,11 @@ class ArucoTrigger(object):
         white_per = np.float(white_cnt) / np.float(total)
         # black_per = (total - white_cnt) / total
 
-        print(total, white_cnt, white_per, (mid_area.max() == 0))
+        print(total, white_cnt, white_per, (mid_area.max() == 0), (top_side_area1.max() == 0), (top_side_area2.max() == 0))
 
         is_pothole = (white_per > 0.1) and (mid_area.max() == 0 and top_side_area1.max() == 0 and top_side_area2.max() == 0)
 
-        buffer_size = 1
+        buffer_size = 3
         if not hasattr(self, "_pothole_buffer"):
             self._pothole_buffer = [False] * buffer_size
 
