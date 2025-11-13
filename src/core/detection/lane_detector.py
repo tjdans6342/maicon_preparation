@@ -45,6 +45,18 @@ class LaneDetector:
         # Pipeline images storage for analysis recording
         self.pipeline_images = {}
             
+        self.image_dict = {
+            "Original": None,
+            "BEV": None,
+            "Filtered": None,
+            "gray": None,
+            "Blurred": None,
+            "binary": None,
+            "Canny": None,
+            "Hough": None,
+            "Lane Detection": None
+        }
+
         rospy.loginfo("📷 LaneDetector subscribed to {}".format(image_topic))
 
     # -------------------------------------------------------
@@ -208,9 +220,22 @@ class LaneDetector:
             minpix=self.cfg.minpix
         )
 
-        # Prepare lane detection visualization
-        lane_detected_img = None
-        if result:
+
+        self.image_dict = {
+            "Original": image,
+            "BEV": bev_img,
+            "Filtered": filtered_img,
+            "gray": gray_img,
+            "Blurred": blur_img,
+            "binary": binary_img,
+            "Canny": canny_img,
+            "Hough": hough_img,
+            # "Lane Detection": lane_detected_img
+        }
+
+
+        if self.cfg.display_mode:
+
             lane_detected_img = self._visualize_lane_detection(
                 hough_img,
                 x=result["x"],
@@ -222,22 +247,9 @@ class LaneDetector:
         else:
             lane_detected_img = cv2.cvtColor(hough_img, cv2.COLOR_GRAY2BGR)
 
-        # Store pipeline images for analysis recording
-        self.pipeline_images = {
-            "Original": image,
-            "BEV": bev_img,
-            "Filtered": filtered_img,
-            "gray": gray_img,
-            "Blurred": blur_img,
-            "binary": binary_img,
-            "Canny": canny_img,
-            "Hough": hough_img,
-            "Lane Detection": lane_detected_img
-        }
 
-        if self.cfg.display_mode:
-            # Use pipeline_images for display
-            image_dict = self.pipeline_images
+            self.image_dict["Lane Detection"] = lane_detected_img
+
 
             window_pos = [
                 (0, 0), (600, 0), (1200, 0),
@@ -253,7 +265,7 @@ class LaneDetector:
             for i, name in enumerate(display_names):
                 cv2.namedWindow(name)
                 cv2.moveWindow(name, window_pos[i][0], window_pos[i][1])
-                cv2.imshow(name, image_dict[name])
+                cv2.imshow(name, self.image_dict[name])
 
             cv2.waitKey(1)
         

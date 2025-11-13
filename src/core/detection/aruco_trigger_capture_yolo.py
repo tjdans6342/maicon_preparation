@@ -70,36 +70,37 @@ class ArucoTrigger(object):
         # 형식: { marker_id: { nth: action 또는 [action들] } }
         # 예시로 캡처 액션이 포함된 규칙들 정의
         self.rules = {
-            # id=0 마커: 1번째 등장 -> 오른쪽 90도 회전, 2번째 등장 -> 오른쪽 20도 회전 후 YOLO 이미지 캡처
-            # 0: {1: [("right", 90), ("left", 90)], 2: [("right", 20), ("yolo_capture", 0)]},
             0: {
                 1: [("drive", 0.25, 0.2111), ("right", 90), ("left", 90)],
             },
             2: {
                 1: [("drive", 0.3, 0.2111), ("right", 90)],
-                2: [("left", 20), ("drive", 0.5, 0.2111), ("left", 90)],
+                2: [("left", 0), ("drive", 0.5, 0.2111), ("left", 90)],
             },
-            # # id=2 마커: 1번째 등장 -> 오른쪽 90도 회전
-            # 2: {1: ("right", 90)},
-            # # id=3 마커: 1번째 등장 -> 왼쪽 90도 회전 후 일반 이미지 캡처, 2번째 등장 -> 오른쪽 90도 회전
-            # 3: {1: [("left", 90), ("capture", 0)], 2: ("right", 90)},
             3: {
-                1: [("drive", 0.35, 0.2111), ("left", 90)], 
-                2: [("left", 0)],
+                1: [("drive", 0.4, 0.2111), ("left", 90)], 
+                2: [("left", 0)], 
+                3: [("drive", 0.45, 0.2111), ("right", 90)],
             },
-            # # id=4 마커: 2번째 등장 -> 왼쪽 90도 회전
             # 4: {
                 # 1: [("drive", 0.3, 0.2111), ("right", 90)], 
                 # 2: [("drive", 0.2, 0.2111), ("left", 90)],
             # },
             5: {
-                1: [("drive", 0.3, 0.2111), ("right", 90)], 
-                2: [("drive", 0.3, 0.2111), ("left", 90)],
+                # 1: [("drive", 0.4, 0.2111), ("right", 90)], 
+                # 2: [("drive", 0.4, 0.2111), ("left", 90)],
+                1: [("drive", 0.35, 0.2111), ("right", 90)], 
+                2: [("drive", 0.35, 0.2111), ("left", 90)],
             },
-            10: {
-                1: [("drive", 0.25, 0.2111), ("right", 90)],
-            },
-
+            # 10: {
+            #     1: [("drive", 0.25, 0.2111), ("right", 90)],
+            # },
+            "pothole": {  # 🔸 포트홀 감지 시 트리거할 규칙
+                # 1: [("circle", 0.3, 1.0, 0.1, "left"), ("drive", 0.2, 0.15)]
+                1: [("drive", 0.00, 0.2111), ("right", 90), ("circle", 0.30, 1.0, 0.2, "left"), ("right", 90)],
+                2: [("drive", 0.00, 0.2111), ("right", 90), ("circle", 0.30, 1.0, 0.2, "left"), ("right", 90)],
+                3: [("drive", 0.00, 0.2111), ("left", 90), ("circle", 0.30, 1.0, 0.2, "right"), ("left", 90)],
+            }
         }
 
         # ArUco 마커 검출 헬퍼 객체 생성
@@ -165,6 +166,12 @@ class ArucoTrigger(object):
         except ImportError as exc:
             rospy.logwarn("[ArucoTrigger] pyzbar not available: %s", exc)
             self.qr_detector = False
+
+        # 포트홀 감지 관련 변수 초기화
+        self.pothole_seen_count = 0        # 몇 번째 포트홀인지
+        self.pothole_last_trigger = 0.0    # 최근 포트홀 트리거 시각
+        self.pothole_cooldown = 5.0        # 포트홀 감지 쿨다운(원하는 만큼)
+
 
     # _gate: 하나의 검출 결과 det(dict)에 대해 유효한 마커로 간주할지 결정
     def _gate(self, det):
@@ -275,6 +282,66 @@ class ArucoTrigger(object):
 
         return False
 
+    def observe_pothole(self, binary_img):
+        if binary_img is None or not isinstance(binary_img, np.ndarray):
+            return False
+
+        now = time.time()
+
+        # --- 쿨다운 체크 ---
+        if (now - self.pothole_last_trigger) < self.pothole_cooldown:
+            return False
+
+        h, w = binary_img.shape[:2]
+        # lower = binary_img[int(h*0.7):, :]
+        # upper = binary_img[:int(h*0.3), :]
+
+        # check pothole condition
+        top_side_area1 = binary_img[:int(h*0.3), :int(0.1*w)]
+        top_side_area2 = binary_img[:int(h*0.3), int(0.9*w):]
+        top_center_area = binary_img[:int(h*0.15), int(0.2*w):int(0.8*w)]
+        mid_area = binary_img[int(h*0.5):int(h*0.7), :]
+
+        white_cnt = np.sum(top_center_area == 255)
+        
+        total = top_center_area.size
+        white_per = np.float(white_cnt) / np.float(total)
+        # black_per = (total - white_cnt) / total
+
+        print(total, white_cnt, white_per, (mid_area.max() == 0), (top_side_area1.max() == 0), (top_side_area2.max() == 0))
+
+        is_pothole = (white_per > 0.1) and (mid_area.max() == 0 and top_side_area1.max() == 0 and top_side_area2.max() == 0)
+
+        buffer_size = 3
+        if not hasattr(self, "_pothole_buffer"):
+            self._pothole_buffer = [False] * buffer_size
+
+        self._pothole_buffer.pop(0)
+        self._pothole_buffer.append(is_pothole)
+
+        detected = all(self._pothole_buffer)
+
+        if not detected:
+            return False
+
+        # ---------------------------
+        #   포트홀 nth 업데이트
+        # ---------------------------
+        self.pothole_seen_count += 1
+        nth = self.pothole_seen_count
+
+        rospy.loginfo("[ArucoTrigger] Pothole detected! nth={}".format(nth))
+
+        self.pothole_last_trigger = now
+        del self._pothole_buffer
+
+        # ---------------------------
+        #  규칙이 있는지 반환
+        # ---------------------------
+        if "pothole" in self.rules and nth in self.rules["pothole"]:
+            return nth  # nth 반환
+        return False
+
     # _rotate_in_place: 주어진 방향과 각도로 로봇을 제자리 회전
     def _rotate_in_place(self, direction, degrees, ang_speed=1.0):
         msg = Twist()
@@ -337,6 +404,57 @@ class ArucoTrigger(object):
         self.drive_pub.publish(Twist())
         rospy.loginfo("[ArucoTrigger] Drove {:.2f}m at {:.2f}m/s".format(distance, speed))
 
+    def _drive_circle(self, diameter=0.3, curvature=1.0, speed=0.1, arrow="left"):
+        """
+        포트홀 회피용 반원형 주행 동작 (곡률 기반 기하학적 계산)
+        - diameter: 회피 경로의 지름 (m)
+        - curvature: 곡률 (1.0 → 정확한 반원, 0.5 → 완만한 곡선)
+        - speed: 주행 속도 (m/s)
+        - arrow: 회전 방향 ("left" or "right")
+        """
+        rate = rospy.Rate(20)
+        curvature += np.finfo(float).eps
+
+        # 회전 방향 부호
+        sign = 1.0 if arrow == "left" else -1.0
+
+
+        # ① 실제 반지름 계산
+        # curvature가 1.0이면 완전 반원, 0.5면 2배 더 큰 원(곡률이 작을수록 완만)
+        # R = (diameter / 2.0) / (curvature + 0.0000001)
+        R = (1.0 / curvature) * (diameter / 2.0)
+
+
+        # ② 각속도(ω = v / R)
+        angular_speed = sign * (speed / R)
+
+
+        # ③ 반원 주행 시간 계산 (arc_length = πR)
+        # arc_length = math.pi * R
+        arc_length = math.pi * diameter / 2.0
+        duration = arc_length / speed
+
+
+        rospy.loginfo(
+            "[ArucoTrigger] Circular avoidance start: dir={}, diam={}, curv={}, R={:.3f}m, duration={:.2f}s".format(arrow, diameter, curvature, R, duration)
+        )
+
+        msg = Twist()
+        msg.linear.x = speed
+        msg.angular.z = angular_speed
+
+        t_start = rospy.Time.now().to_sec()
+        while (rospy.Time.now().to_sec() - t_start) < duration and not rospy.is_shutdown():
+            self.drive_pub.publish(msg)
+            rate.sleep()
+
+
+        # ④ 종료 (정지)
+        self.drive_pub.publish(Twist())
+        rospy.sleep(0.1)  # 🔸 짧은 완충 시간 (덜컥 방지)
+        rospy.loginfo("[ArucoTrigger] Finished circular avoidance ({}), curvature={}".format(arrow, curvature))
+
+
 
     # step: EXECUTE_ACTION 모드에서 pending_actions의 액션들을 순차적으로 실행
     def step(self):
@@ -361,6 +479,13 @@ class ArucoTrigger(object):
                 distance = args[0] if len(args) >= 1 else 1.0
                 speed = args[1] if len(args) >= 2 else 0.1
                 self._drive_distance(distance=distance, speed=speed)
+            elif direction == "circle":
+                # drive_circle(diameter, curvature, speed, arrow)
+                diameter = args[0] if len(args) >= 1 else 0.3
+                curvature = args[1] if len(args) >= 2 else 1.0
+                speed = args[2] if len(args) >= 3 else 0.1
+                arrow = args[3] if len(args) >= 4 else "left"
+                self._drive_circle(diameter=diameter, curvature=curvature, speed=speed, arrow=arrow)
             else:
                 # 회전 관련 명령 (오른쪽, 왼쪽, turn 등)
                 degrees = args[0] if len(args) >= 1 else 90.0

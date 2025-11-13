@@ -8,7 +8,8 @@ DARK_HLS = [[0, 0, 0], [180, 140, 200]] # 기존에 했던 값
 # WHITE_HLS = [(0, 120, 0), (180, 255, 255)] # white line 2139_area1
 
 
-WHITE_HLS = [(0, 140, 0), (180, 255, 255)] # white line 1213_area2
+# WHITE_HLS = [(0, 140, 0), (180, 255, 255)] # white line 1213_area2
+WHITE_HLS = [(0, 140, 0), (180, 255, 255)] # white line 1653_area2
 # WHITE_HLS = [(0, 180, 0), (180, 255, 255)] # white line 1020_area2 (not~~~)
 
 YELLOW_HLS = [(20, 70, 12), (40, 130, 110)] # yellow line
@@ -84,7 +85,7 @@ class Robot:
             min_votes=50, #60,
 
             display_mode=True,
-            image_names=["Original", "BEV", "Filtered"] #, "Canny", "Hough", "Lane Detection"]
+            image_names=["Original", "BEV", "Filtered", "Canny"] #, "Hough", "Lane Detection"]
             # "Original", "BEV", "Filtered":, "gray", "Blurred", "binary", "Canny", "Hough", "Lane Detection"
         )
         
@@ -117,8 +118,8 @@ class Robot:
             'heading': deque([0] * self.error_queue_size),
             'lat': deque([0] * self.error_queue_size),
         }
-        self.linear_option = self.control_configs['linear0.30'] # can be tuned
-        self.curved_option = self.control_configs['curved0.20'] # can be tuned
+        self.linear_option = self.control_configs['linear0.15'] # can be tuned
+        self.curved_option = self.control_configs['curved0.15'] # can be tuned
 
         self.base_speed, self.lat_weight, self.heading_weight = self.linear_option
 
@@ -131,7 +132,9 @@ class Robot:
         # self.fire = FireDetector(topic_name="/fire_cam/image_raw/compressed")
 
 
-        self.mode = "LANE_FOLLOW"  # 초기 모드 설정
+        self.mode = "LANE_FOLLOW"  # 초기 모드
+        # 가능한 모드: LANE_FOLLOW, ARUCO, POTHOLE_AVOID
+
 
         self.last_switch_time = rospy.get_time()
 
@@ -252,8 +255,31 @@ class Robot:
         if self.mode == "LANE_FOLLOW":
             frame = self.lane.image
             if frame is not None:
-                # pass
                 self.aruco.observe_and_maybe_trigger(frame)
+
+            # --- 포트홀 감지 (임시 로직, 추후 YOLO로 교체 가능) ---
+            image_name = "binary"
+            if self.mode == "LANE_FOLLOW" and self.lane.image_dict[image_name] is not None:
+                # pothole_detected = self.aruco.observe_pothole(self.lane.image_dict[image_name])
+                # if pothole_detected:
+                #     rospy.loginfo("[Robot] 🕳️ Pothole detected! Triggering avoidance.")
+                #     self.aruco.pending_actions = list(self.aruco.rules["pothole"][1])
+                #     self.aruco.mode = "EXECUTE_ACTION"
+                #     self.mode = "ARUCO"
+                #     return
+                
+                nth = self.aruco.observe_pothole(self.lane.image_dict[image_name])
+
+                if nth:
+                    rospy.loginfo("[Robot] 🕳️ Pothole detected! nth={}".format(nth))
+
+                    actions = self.aruco.rules["pothole"].get(nth)
+                    if actions:
+                        self.aruco.pending_actions = list(actions)
+                        self.aruco.mode = "EXECUTE_ACTION"
+                        self.mode = "ARUCO"
+                        return
+
 
         # --- 아루코 상태 확인 ---
         if self.aruco.mode == "EXECUTE_ACTION":
