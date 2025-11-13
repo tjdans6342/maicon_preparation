@@ -84,7 +84,7 @@ class Robot:
             slope_threshold=20,
             min_votes=50, #60,
 
-            display_mode=True,
+            display_mode=False,
             image_names=["Original", "BEV", "Filtered", "Canny"] #, "Hough", "Lane Detection"]
             # "Original", "BEV", "Filtered":, "gray", "Blurred", "binary", "Canny", "Hough", "Lane Detection"
         )
@@ -316,8 +316,8 @@ class Robot:
         #     rospy.loginfo("✅ No fire detected, starting normal operation")
         
 
-        # # Register cleanup callback
-        # rospy.on_shutdown(self._cleanup)
+        # Register cleanup callback
+        rospy.on_shutdown(self._cleanup)
 
         while not rospy.is_shutdown():
             self._check_mode_transition()

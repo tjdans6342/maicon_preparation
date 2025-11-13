@@ -13,8 +13,8 @@ class VideoConfig:
     def __init__(self):
         # Enable/disable recording
 
-        # self.enabled = True
-        self.enabled = False
+        self.enabled = True
+        # self.enabled = False
         
         # Output directory for videos
         self.output_dir = "robot_videos"  # Changed to relative path

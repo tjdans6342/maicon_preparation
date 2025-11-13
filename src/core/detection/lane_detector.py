@@ -42,9 +42,7 @@ class LaneDetector:
         else:
             self.error_queue = error_queue
         
-        # Pipeline images storage for analysis recording
-        self.pipeline_images = {}
-            
+
         self.image_dict = {
             "Original": None,
             "BEV": None,
@@ -244,10 +242,10 @@ class LaneDetector:
                 mid_avg=result["mid_avg"],
                 nwindows=self.cfg.nwindows
             )
-        else:
+
             lane_detected_img = cv2.cvtColor(hough_img, cv2.COLOR_GRAY2BGR)
 
-
+        
             self.image_dict["Lane Detection"] = lane_detected_img
 
 
@@ -281,7 +279,7 @@ class LaneDetector:
             Keys: "Original", "BEV", "Filtered", "gray", "Blurred", 
                   "binary", "Canny", "Hough", "Lane Detection"
         """
-        return self.pipeline_images
+        return self.image_dict
 
 
 # -------------------------------------------------------
