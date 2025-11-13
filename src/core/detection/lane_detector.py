@@ -41,7 +41,8 @@ class LaneDetector:
             }
         else:
             self.error_queue = error_queue
-            
+        
+
         self.image_dict = {
             "Original": None,
             "BEV": None,
@@ -217,6 +218,7 @@ class LaneDetector:
             minpix=self.cfg.minpix
         )
 
+
         self.image_dict = {
             "Original": image,
             "BEV": bev_img,
@@ -231,16 +233,21 @@ class LaneDetector:
 
 
         if self.cfg.display_mode:
+
             lane_detected_img = self._visualize_lane_detection(
                 hough_img,
-                x=result["x"] if result else [],
-                y=result["y"] if result else [],
-                fit=result["fit"] if result else [0,0,0],
-                mid_avg=result["mid_avg"] if result else 0,
+                x=result["x"],
+                y=result["y"],
+                fit=result["fit"],
+                mid_avg=result["mid_avg"],
                 nwindows=self.cfg.nwindows
             )
 
+            lane_detected_img = cv2.cvtColor(hough_img, cv2.COLOR_GRAY2BGR)
+
+        
             self.image_dict["Lane Detection"] = lane_detected_img
+
 
             window_pos = [
                 (0, 0), (600, 0), (1200, 0),
@@ -261,6 +268,18 @@ class LaneDetector:
             cv2.waitKey(1)
         
         return result
+
+    def get_pipeline_images(self):
+        """
+        Get all pipeline processing images for analysis/recording
+        
+        Returns
+        -------
+        dict : Dictionary containing all pipeline images
+            Keys: "Original", "BEV", "Filtered", "gray", "Blurred", 
+                  "binary", "Canny", "Hough", "Lane Detection"
+        """
+        return self.image_dict
 
 
 # -------------------------------------------------------

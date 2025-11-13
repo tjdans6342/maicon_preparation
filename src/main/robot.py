@@ -21,7 +21,7 @@ import time
 import numpy as np
 
 from src.core.detection.lane_detector import LaneDetector
-from src.core.detection.fire_detector import FireDetector
+#from src.core.detection.fire_detector import FireDetector
 # from src.core.detection.aruco_trigger import ArucoTrigger
 from src.core.detection.aruco_trigger_capture_yolo import ArucoTrigger
 from src.core.control.pid_controller import PIDController
@@ -37,7 +37,16 @@ from src.configs.lane_config import LaneConfig
 from src.configs.video_config import VideoConfig
 from src.core.recording.video_recorder import VideoRecorder
 
+#### lane analysis recording
+from src.core.recording.lane_analysis_recorder import LaneAnalysisRecorder
+
 ########
+
+### fire detection
+
+### Fire detection
+#from src.core.detection.fire_building_detector import FireBuildingDetector
+
 
 
 
@@ -75,7 +84,7 @@ class Robot:
             slope_threshold=20,
             min_votes=50, #60,
 
-            display_mode=True,
+            display_mode=False,
             image_names=["Original", "BEV", "Filtered", "Canny"] #, "Hough", "Lane Detection"]
             # "Original", "BEV", "Filtered":, "gray", "Blurred", "binary", "Canny", "Hough", "Lane Detection"
         )
@@ -132,20 +141,43 @@ class Robot:
         rospy.loginfo("Starting main control loop...")
 
 
-        ### video recoding
+        ### video recording (original camera feed)
 
-            # Video Recording Module
-
-        # video_cfg = VideoConfig()
-        # self.video_recorder = VideoRecorder(config=video_cfg)
+        # Video Recording Module
+        video_cfg = VideoConfig()
+        self.video_recorder = VideoRecorder(config=video_cfg)
         
-        # # Start recording
-        # self.video_recorder.start_recording()
+        # Start recording
+        self.video_recorder.start_recording()
         
-        # rospy.loginfo("✅ All subsystems initialized.")
+        rospy.loginfo("✅ Video recorder initialized.")
+
+
+        ### fire detection
+
+            ### Fire Building Detection
+        ## TODO:
+        ## TODO
+        # self.fire_detector = FireBuildingDetector(
+        #     weights_path="/home/jetson/catkin_ws/src/weights/best.pt"  ## TODO: Change this path
+        # )
+        # self.fire_image_folder = "/home/jetson/catkin_ws/src/test_images"  ## TODO: Change this path
+        # self.detected_fire_buildings = []
+        
+        # rospy.loginfo("✅ Fire detector initialized.")
+
+
+        ### lane analysis recording
+        
+        # Initialize lane analysis recorder
+        self.lane_analysis_recorder = LaneAnalysisRecorder()
+        self.lane_analysis_recorder.start_recording()
+        
+        rospy.loginfo("✅ Lane analysis recorder initialized.")
 
 
 
+        
     # -------------------------------------------------------
     #  차선 기반 주행 모드
     # -------------------------------------------------------
@@ -190,18 +222,14 @@ class Robot:
 
         self.aruco.step()  # 아루코 액션 중이면 계속 실행 (이거 사실 필요 없을 거 같은데..)
 
+        # Add frame to original video recorder
+        if self.lane.image is not None:
+            self.video_recorder.add_frame(self.lane.image)
 
-            # Add frame to video recorder
-
-        # if self.lane.image is not None:
-        #     self.video_recorder.add_frame(self.lane.image)
-
-
-
-            # Add frame to video recorder
-
-        # if self.lane.image is not None:
-        #     self.video_recorder.add_frame(self.lane.image)
+        # Add pipeline frames to lane analysis recorder
+        pipeline_images = self.lane.get_pipeline_images()
+        if pipeline_images:
+            self.lane_analysis_recorder.add_pipeline_frame(pipeline_images)
 
 
     # -------------------------------------------------------
@@ -274,9 +302,22 @@ class Robot:
     def run(self):
         rate = rospy.Rate(20)
 
-        #Register cleanup callback
+
+        ### TO SEE fire detection whenwhen start
+        # rospy.loginfo("🔥 Starting fire detection...")
+        # fire_buildings = self.check_fire_detection()
         
-        # rospy.on_shutdown(self._cleanup)
+        # if fire_buildings:
+        #     rospy.loginfo("🔥 Fire detected in buildings: {}".format(fire_buildings))
+        #     for building_num in fire_buildings:
+        #         rospy.loginfo("🤖 Navigating to building {}".format(building_num))
+        #         self.navigate_to_fire_building(building_num)
+        # else:
+        #     rospy.loginfo("✅ No fire detected, starting normal operation")
+        
+
+        # Register cleanup callback
+        rospy.on_shutdown(self._cleanup)
 
         while not rospy.is_shutdown():
             self._check_mode_transition()
@@ -288,11 +329,9 @@ class Robot:
                 # ArucoTrigger 내부에서 step()이 액션 실행 중임
                 self.aruco.step()
 
-
-                # send video 
-
-                # if self.lane.image is not None:
-                #     self.video_recorder.add_frame(self.lane.image)
+                # Send video frame during ARUCO mode
+                if self.lane.image is not None:
+                    self.video_recorder.add_frame(self.lane.image)
 
                 # 모두 끝나면 ArucoTrigger가 자동으로 LANE_FOLLOW 복귀
                 if self.aruco.mode == "LANE_FOLLOW":
@@ -304,10 +343,66 @@ class Robot:
 
             rate.sleep()
 
+
+    #### fire detection
+
+        # -------------------------------------------------------
+    #  Fire Detection Methods
+    # -------------------------------------------------------
+    def check_fire_detection(self):
+        """
+        Randomly select building image and detect fires
+        Returns list of building numbers with fire
+        """
+        if not hasattr(self, 'fire_detector'):
+            return []
+        
+        image_path, fire_buildings = self.fire_detector.detect_random_from_folder(
+            folder_path=self.fire_image_folder,
+            conf_threshold=0.25,
+            img_size=416
+        )
+        
+        if fire_buildings:
+            rospy.loginfo("🔥 Fire detected in buildings: {}".format(fire_buildings))
+            self.detected_fire_buildings = fire_buildings
+            return fire_buildings
+        else:
+            rospy.loginfo("✅ No fire detected")
+            return []
+    
+    def navigate_to_fire_building(self, building_number):
+        """
+        Navigate robot to specified building number
+        
+        Args:
+            building_number: Building number (1-9)
+        """
+        ## TODO: Map building numbers to your actual ArUco marker IDs
+        building_to_marker = {
+            1: 1,
+            2: 2,
+            3: 3,
+            4: 4,
+            5: 5,
+            6: 6,
+            7: 7,
+            8: 8,
+            9: 9
+        }
+        
+        marker_id = building_to_marker.get(building_number)
+        if marker_id:
+            rospy.loginfo("🤖 Navigating to building {} (marker {})".format(building_number, marker_id))
+            ## TODO: Implement navigation logic using your ArUco system
+        else:
+            rospy.logwarn("No marker mapping for building {}".format(building_number))
+    
     def _cleanup(self):
         """
         Cleanup resources on ROS shutdown
         - Stop video recording
+        - Stop lane analysis recording
         - Stop robot movement
         """
         rospy.loginfo("🛑 Robot shutting down...")
@@ -316,6 +411,11 @@ class Robot:
         if hasattr(self, 'video_recorder') and self.video_recorder.is_recording():
             rospy.loginfo("[Cleanup] Stopping video recorder...")
             self.video_recorder.stop_recording()
+        
+        # Stop lane analysis recording
+        if hasattr(self, 'lane_analysis_recorder') and self.lane_analysis_recorder.is_recording():
+            rospy.loginfo("[Cleanup] Stopping lane analysis recorder...")
+            self.lane_analysis_recorder.stop_recording()
         
         # Stop robot movement
         if hasattr(self, 'controller'):
