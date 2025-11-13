@@ -96,7 +96,7 @@ class ArucoTrigger(object):
             "pothole": {  # 🔸 포트홀 감지 시 트리거할 규칙
                 # 1: [("circle", 0.3, 1.0, 0.1, "left"), ("drive", 0.2, 0.15)]
                 1: [("drive", 0.00, 0.2111), ("right", 90), ("circle", 0.30, 1.0, 0.2, "left"), ("right", 90)],
-                # 2: [("right", 90), ("circle", 0.3, 1.0, 0.1, "left"), ("right", 90)],
+                2: [("drive", 0.00, 0.2111), ("left", 90), ("circle", 0.30, 1.0, 0.2, "right"), ("left", 90)],
             }
         }
 
@@ -163,6 +163,12 @@ class ArucoTrigger(object):
         except ImportError as exc:
             rospy.logwarn("[ArucoTrigger] pyzbar not available: %s", exc)
             self.qr_detector = False
+
+        # 포트홀 감지 관련 변수 초기화
+        self.pothole_seen_count = 0        # 몇 번째 포트홀인지
+        self.pothole_last_trigger = 0.0    # 최근 포트홀 트리거 시각
+        self.pothole_cooldown = 5.0        # 포트홀 감지 쿨다운(원하는 만큼)
+
 
     # _gate: 하나의 검출 결과 det(dict)에 대해 유효한 마커로 간주할지 결정
     def _gate(self, det):
@@ -274,41 +280,49 @@ class ArucoTrigger(object):
         return False
 
     def observe_pothole(self, binary_img):
-        """
-        포트홀 감지 함수
-        - 입력: 이진 이미지 (0 또는 255)
-        - 조건: 하단 70% 영역의 모든 픽셀이 0인 상태가 k프레임 연속이면 포트홀로 판정
-        """
         if binary_img is None or not isinstance(binary_img, np.ndarray):
             return False
 
+        now = time.time()
+
+        # --- 쿨다운 체크 ---
+        if (now - self.pothole_last_trigger) < self.pothole_cooldown:
+            return False
+
         h, w = binary_img.shape[:2]
-        lower_region = binary_img[int(h * 0.7):, :]  # 하단 70% 영역
+        lower = binary_img[int(h*0.7):, :]
+        upper = binary_img[:int(h*0.3), :]
 
-        higher_region = binary_img[:int(h*0.3), :] # top 30% 영역
+        is_black = np.all(lower == 0) and (not np.all(upper == 0))
 
-        # 완전히 검정색 여부 판단 (모든 픽셀 == 0)
-        is_pothole = np.all(lower_region == 0) and (not np.all(higher_region == 0))
-
-
-        # 상태 버퍼 초기화
-        buffer_size = 10
         if not hasattr(self, "_pothole_buffer"):
-            self._pothole_buffer = [False] * buffer_size
+            self._pothole_buffer = [False] * 10
 
-        # 최신 상태 추가 (FIFO)
         self._pothole_buffer.pop(0)
-        self._pothole_buffer.append(is_pothole)
+        self._pothole_buffer.append(is_black)
 
-        # buffer_size 프레임 연속 검정이면 True 반환
         detected = all(self._pothole_buffer)
 
-        if detected:
-            rospy.loginfo("[ArucoTrigger] 🕳️ Pothole detected! ({} consecutive black frames)".format(buffer_size))
-            # 검출 이후 버퍼 초기화 (중복 방지)
-            del self._pothole_buffer
+        if not detected:
+            return False
 
-        return detected
+        # ---------------------------
+        #   포트홀 nth 업데이트
+        # ---------------------------
+        self.pothole_seen_count += 1
+        nth = self.pothole_seen_count
+
+        rospy.loginfo(f"[ArucoTrigger] Pothole detected! nth={nth}")
+
+        self.pothole_last_trigger = now
+        del self._pothole_buffer
+
+        # ---------------------------
+        #  규칙이 있는지 반환
+        # ---------------------------
+        if "pothole" in self.rules and nth in self.rules["pothole"]:
+            return nth  # nth 반환
+        return False
 
     # _rotate_in_place: 주어진 방향과 각도로 로봇을 제자리 회전
     def _rotate_in_place(self, direction, degrees, ang_speed=1.0):
@@ -407,11 +421,9 @@ class ArucoTrigger(object):
             "[ArucoTrigger] Circular avoidance start: dir={}, diam={}, curv={}, R={:.3f}m, duration={:.2f}s".format(arrow, diameter, curvature, R, duration)
         )
 
-
         msg = Twist()
         msg.linear.x = speed
         msg.angular.z = angular_speed
-
 
         t_start = rospy.Time.now().to_sec()
         while (rospy.Time.now().to_sec() - t_start) < duration and not rospy.is_shutdown():
@@ -423,18 +435,6 @@ class ArucoTrigger(object):
         self.drive_pub.publish(Twist())
         rospy.sleep(0.1)  # 🔸 짧은 완충 시간 (덜컥 방지)
         rospy.loginfo("[ArucoTrigger] Finished circular avoidance ({}), curvature={}".format(arrow, curvature))
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
