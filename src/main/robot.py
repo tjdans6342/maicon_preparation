@@ -19,6 +19,13 @@ YELLOW_HLS = [(20, 70, 12), (40, 130, 110)] # yellow line
 import rospy
 import time
 import numpy as np
+import os
+import sys
+
+# 프로젝트 루트 경로 추가
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 from src.core.detection.lane_detector import LaneDetector
 #from src.core.detection.fire_detector import FireDetector
@@ -27,6 +34,12 @@ from src.core.detection.aruco_trigger_capture_yolo import ArucoTrigger
 from src.core.control.pid_controller import PIDController
 from src.core.control.controller import Controller
 
+# 인터페이스 및 ROS 구현체 import
+from platform.ros.ros_motor_controller import ROSMotorController
+from platform.ros.ros_camera import ROSCamera
+from platform.ros.ros_display import ROSDisplay
+from platform.ros.ros_led import ROSLedController
+from platform.ros.ros_imu import ROSImu
 
 from src.configs.lane_config import LaneConfig
 
@@ -125,9 +138,39 @@ class Robot:
 
         self.lane = LaneDetector(image_topic="/usb_cam/image_raw/compressed", config=cfg, error_queue=self.error_queue)
 
-        # ArucoTrigger 초기화 & Controller 초기화 & PIDController 초기화
+        # ============================================================
+        # 인터페이스 초기화 (리팩토링: 인터페이스 주입 방식)
+        # ============================================================
+        # 환경 변수로 ROS/Tiki 선택 가능 (기본값: ROS)
+        robot_env = os.getenv("ROBOT_ENV", "ROS")
+        
+        if robot_env == "ROS":
+            # ROS 환경: ROS 구현체 생성
+            self.motor = ROSMotorController(topic_name="/cmd_vel")
+            self.camera = ROSCamera(image_topic="/usb_cam/image_raw/compressed")
+            self.display = ROSDisplay()
+            self.led = ROSLedController()
+            self.imu = ROSImu(imu_topic="/imu/data")
+            rospy.loginfo("✅ ROS platform interfaces initialized")
+        else:
+            # Tiki 환경 (향후 구현)
+            # from platform.tiki.tiki_motor_controller import TikiMotorController
+            # self.motor = TikiMotorController()
+            # ...
+            rospy.logwarn("Tiki environment not yet implemented, using ROS")
+            self.motor = ROSMotorController(topic_name="/cmd_vel")
+            self.camera = ROSCamera(image_topic="/usb_cam/image_raw/compressed")
+            self.display = ROSDisplay()
+            self.led = ROSLedController()
+            self.imu = ROSImu(imu_topic="/imu/data")
+        
+        # Controller 초기화 (인터페이스 주입)
+        self.controller = Controller(motor_interface=self.motor)
+        
+        # ArucoTrigger 초기화 (기존 방식 유지 - 향후 인터페이스 주입으로 확장 가능)
         self.aruco = ArucoTrigger(cmd_topic="/cmd_vel")
-        self.controller = Controller("/cmd_vel")
+        
+        # PIDController 초기화
         self.pid = PIDController(kp=0.65, ki=0.001, kd=0.01, integral_limit=2.0)
         # self.fire = FireDetector(topic_name="/fire_cam/image_raw/compressed")
 

@@ -10,7 +10,9 @@ from geometry_msgs.msg import Twist
 import sys
 
 # 프로젝트 루트 경로 추가
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 from src.utils.marker_utils import detect_aruco_markers
 from src.utils.image_utils import save_image_with_counter
 from src.utils.pothole_utils import check_binary_image_pothole
