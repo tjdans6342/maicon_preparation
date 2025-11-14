@@ -7,56 +7,26 @@ import numpy as np
 from cv_bridge import CvBridge
 # from pyzbar import pyzbar
 from geometry_msgs.msg import Twist
+import sys
 
-# OpenCV ArUco dictionary and parameters (handle version compatibility)
-try:
-    ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-except AttributeError:
-    ARUCO_DICT = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)
+# 프로젝트 루트 경로 추가
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
+from src.utils.marker_utils import detect_aruco_markers
+from src.utils.image_utils import save_image_with_counter
+from src.utils.pothole_utils import check_binary_image_pothole
+from src.utils.motion_utils import compute_turn_duration, compute_drive_duration, compute_circle_duration
 
-try:
-    ARUCO_PARAMS = cv2.aruco.DetectorParameters_create()
-except AttributeError:
-    ARUCO_PARAMS = cv2.aruco.DetectorParameters()
-
-# ArUco 마커를 검출해주는 전용 헬퍼 클래스 정의
+# ArUco 마커를 검출해주는 전용 헬퍼 클래스 정의 (기존 호환성 유지)
 class ArucoDetector(object):
     # 생성자: CvBridge를 초기화하여 ROS 이미지 <-> OpenCV 이미지를 변환 가능하게 함
-    # -> ROS에서 받아온 sensor_msgs/CompressedImage를 OpenCV가 처리할 수 있는 numpy 배열로 바꿔야만 마커를 찾을 수 있기 때문
     def __init__(self):
         self.bridge = CvBridge()
 
-    # BGR 이미지(bgr_img)를 입력받아
-    #  - id: 마커 ID
-    #  - center: (x, y) 중심 좌표
-    #  - area: 마커의 대략적인 면적(픽셀 단위)
-    # 를 담은 딕셔너리들의 리스트를 반환
+    # BGR 이미지(bgr_img)를 입력받아 마커 정보 리스트 반환
+    # 리팩토링: 유틸 함수 사용
     def detect_ids(self, bgr_img):
         """ bgr_img에서 (id, center(x,y), 면적) 리스트 반환 """
-        # 컬러 이미지를 그레이스케일로 변환 (마커 검출은 흑백 영상에서 수행)
-        gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
-        # ArUco 마커 검출 수행
-        # corners: 검출된 각 마커의 꼭짓점 좌표들
-        # ids: 검출된 마커들의 ID 배열
-        # _ : (unused) rejected candidates etc.
-        corners, ids, _ = cv2.aruco.detectMarkers(gray, ARUCO_DICT, parameters=ARUCO_PARAMS)
-        results = []
-        if ids is not None:
-            ids = ids.flatten()
-            # 각 검출된 마커마다 정보 추출
-            for c, i in zip(corners, ids):
-                pts = c.reshape(-1, 2)  # (4,2) shape array of corner points
-                # 마커 중심 좌표 계산 (x, y 평균)
-                cx = float(np.mean(pts[:, 0]))
-                cy = float(np.mean(pts[:, 1]))
-                # 마커의 폭과 높이 계산 (픽셀 단위)
-                w = float(np.max(pts[:, 0]) - np.min(pts[:, 0]))
-                h = float(np.max(pts[:, 1]) - np.min(pts[:, 1]))
-                # 면적을 사각형으로 근사 (w * h)
-                area = abs(w * h)
-                # id, 중심, 면적 정보를 결과 리스트에 추가
-                results.append({"id": int(i), "center": (cx, cy), "area": area})
-        return results
+        return detect_aruco_markers(bgr_img)
 
 # ArucoTrigger: ArUco 마커를 감지해서 로봇의 행동을 트리거하는 핵심 클래스
 class ArucoTrigger(object):
@@ -184,30 +154,40 @@ class ArucoTrigger(object):
         return area_ok and y_ok
 
     # _capture_image: 마지막 저장된 프레임과 마지막 마커 ID를 사용해 이미지를 저장 (일반 캡처)
+    # 리팩토링: 유틸 함수 사용
     def _capture_image(self):
         if self._last_bgr_img is None or self._last_marker_id is None:
             rospy.logwarn("[ArucoTrigger] Cannot capture image: last frame or ID is missing.")
             return
         mid = self._last_marker_id
-        if mid not in self.capture_count:
-            self.capture_count[mid] = 0
-        self.capture_count[mid] += 1
-        filename = os.path.join(self.save_dir, "triggered_object{}_{}.jpg".format(mid, self.capture_count[mid]))
-        cv2.imwrite(filename, self._last_bgr_img)
-        rospy.loginfo("[ArucoTrigger] Triggered image saved: {}".format(filename))
+        filepath = save_image_with_counter(
+            img=self._last_bgr_img,
+            save_dir=self.save_dir,
+            marker_id=mid,
+            counter_dict=self.capture_count,
+            prefix="triggered_object",
+            file_extension=".jpg"
+        )
+        if filepath:
+            rospy.loginfo("[ArucoTrigger] Triggered image saved: {}".format(filepath))
 
     # _capture_yolo_image: 마지막 프레임을 별도 디렉토리에 YOLO 추론용 이미지로 저장
+    # 리팩토링: 유틸 함수 사용
     def _capture_yolo_image(self):
         if self._last_bgr_img is None or self._last_marker_id is None:
             rospy.logwarn("[ArucoTrigger] Cannot YOLO-capture image: last frame or ID is missing.")
             return
         mid = self._last_marker_id
-        if mid not in self.yolo_capture_count:
-            self.yolo_capture_count[mid] = 0
-        self.yolo_capture_count[mid] += 1
-        filename = os.path.join(self.yolo_save_dir, "yolo_{}_{}.jpg".format(mid, self.yolo_capture_count[mid]))
-        cv2.imwrite(filename, self._last_bgr_img)
-        rospy.loginfo("[ArucoTrigger] YOLO image saved: %s", filename)
+        filepath = save_image_with_counter(
+            img=self._last_bgr_img,
+            save_dir=self.yolo_save_dir,
+            marker_id=mid,
+            counter_dict=self.yolo_capture_count,
+            prefix="yolo_",
+            file_extension=".jpg"
+        )
+        if filepath:
+            rospy.loginfo("[ArucoTrigger] YOLO image saved: %s", filepath)
 
     # observe_and_maybe_trigger: LANE_FOLLOW 모드에서 매 프레임 호출.
     # 아루코 마커를 감지하고 조건 충족 시 pending_actions에 액션을 넣고 모드를 EXECUTE_ACTION으로 전환.
@@ -283,6 +263,10 @@ class ArucoTrigger(object):
         return False
 
     def observe_pothole(self, binary_img):
+        """
+        포트홀을 감지합니다.
+        리팩토링: 유틸 함수 사용
+        """
         if binary_img is None or not isinstance(binary_img, np.ndarray):
             return False
 
@@ -292,26 +276,10 @@ class ArucoTrigger(object):
         if (now - self.pothole_last_trigger) < self.pothole_cooldown:
             return False
 
-        h, w = binary_img.shape[:2]
-        # lower = binary_img[int(h*0.7):, :]
-        # upper = binary_img[:int(h*0.3), :]
+        # 리팩토링: 유틸 함수 사용
+        is_pothole = check_binary_image_pothole(binary_img, white_threshold=0.1)
 
-        # check pothole condition
-        top_side_area1 = binary_img[:int(h*0.3), :int(0.1*w)]
-        top_side_area2 = binary_img[:int(h*0.3), int(0.9*w):]
-        top_center_area = binary_img[:int(h*0.15), int(0.2*w):int(0.8*w)]
-        mid_area = binary_img[int(h*0.5):int(h*0.7), :]
-
-        white_cnt = np.sum(top_center_area == 255)
-        
-        total = top_center_area.size
-        white_per = np.float(white_cnt) / np.float(total)
-        # black_per = (total - white_cnt) / total
-
-        print(total, white_cnt, white_per, (mid_area.max() == 0), (top_side_area1.max() == 0), (top_side_area2.max() == 0))
-
-        is_pothole = (white_per > 0.1) and (mid_area.max() == 0 and top_side_area1.max() == 0 and top_side_area2.max() == 0)
-
+        # 버퍼 관리 (연속 프레임 확인)
         buffer_size = 3
         if not hasattr(self, "_pothole_buffer"):
             self._pothole_buffer = [False] * buffer_size
@@ -343,29 +311,30 @@ class ArucoTrigger(object):
         return False
 
     # _rotate_in_place: 주어진 방향과 각도로 로봇을 제자리 회전
+    # 리팩토링: motion_utils 함수 사용
     def _rotate_in_place(self, direction, degrees, ang_speed=1.0):
         msg = Twist()
         msg.linear.x = 0.0  # 회전만 할 것이므로 직진속도 0
+        
+        # 회전 각도 결정
         if direction == "right":
-            # 오른쪽 회전 (z축 음수 각속도)
             msg.angular.z = -abs(ang_speed)
-            # 회전 지속 시간 = 회전 각도(라디안) / 각속도(라디안/초)
-            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+            angle = abs(degrees)
         elif direction == "left":
-            # 왼쪽 회전 (z축 양수 각속도)
             msg.angular.z = abs(ang_speed)
-            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+            angle = abs(degrees)
         elif direction == "turn":
-            # "turn": 고정 각도 (120도) 왼쪽 회전
             msg.angular.z = abs(ang_speed)
-            duration = 120.0 * math.pi/180.0 / abs(ang_speed)
+            angle = 120.0  # 고정 각도
         elif direction == "turn1":
-            # "turn1": 오른쪽 회전을 degrees만큼 수행
             msg.angular.z = -abs(ang_speed)
-            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+            angle = abs(degrees)
         else:
             # 정의되지 않은 방향 명령은 무시
             return
+
+        # 리팩토링: 유틸 함수로 회전 시간 계산
+        duration = compute_turn_duration(angle, ang_speed)
 
         rate = rospy.Rate(20)  # 20 Hz로 명령 퍼블리시
         t0 = rospy.Time.now().to_sec()
@@ -379,6 +348,7 @@ class ArucoTrigger(object):
     def _drive_distance(self, distance=1.0, speed=0.1):
         """
             지정한 거리(m)만큼 지정 속도(m/s)로 직진 주행하는 함수.
+            리팩토링: motion_utils 함수 사용
 
             Parameters
             ----------
@@ -391,9 +361,11 @@ class ArucoTrigger(object):
         msg.linear.x = speed
         msg.angular.z = 0.0
 
+        # 리팩토링: 유틸 함수로 주행 시간 계산
+        duration = compute_drive_duration(distance, speed)
+
         rate = rospy.Rate(20)  # 20Hz 퍼블리시
         start_time = rospy.Time.now().to_sec()
-        duration = abs(distance / speed)  # 이동에 필요한 시간
 
         # 지정된 시간 동안 속도 명령 퍼블리시
         while (rospy.Time.now().to_sec() - start_time) < duration and not rospy.is_shutdown():
@@ -429,10 +401,9 @@ class ArucoTrigger(object):
         angular_speed = sign * (speed / R)
 
 
-        # ③ 반원 주행 시간 계산 (arc_length = πR)
-        # arc_length = math.pi * R
-        arc_length = math.pi * diameter / 2.0
-        duration = arc_length / speed
+        # ③ 반원 주행 시간 계산
+        # 리팩토링: 유틸 함수 사용
+        duration = compute_circle_duration(diameter, speed)
 
 
         rospy.loginfo(

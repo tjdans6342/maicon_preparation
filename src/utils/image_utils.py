@@ -228,3 +228,142 @@ def get_hough_image(canny_image, slope_threshold=10, min_votes=100):
             cv2.line(hough_img, (x1, y1), (x2, y2), 255, 2)
 
     return hough_img
+
+
+def save_image(img, save_dir, filename_prefix="image", file_extension=".jpg"):
+    """
+    이미지를 파일로 저장합니다.
+    
+    Parameters
+    ----------
+    img : np.ndarray
+        저장할 이미지 (BGR 형식)
+    save_dir : str
+        저장할 디렉토리 경로
+    filename_prefix : str, default="image"
+        파일명 접두사
+    file_extension : str, default=".jpg"
+        파일 확장자
+    
+    Returns
+    -------
+    str or None
+        저장된 파일의 전체 경로. 실패 시 None
+    """
+    import os
+    import cv2
+    
+    if img is None:
+        return None
+    
+    # 디렉토리가 없으면 생성
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    
+    # 파일명 생성 (타임스탬프 포함)
+    import time
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    filename = "{}_{}{}".format(filename_prefix, timestamp, file_extension)
+    filepath = os.path.join(save_dir, filename)
+    
+    # 이미지 저장
+    success = cv2.imwrite(filepath, img)
+    
+    if success:
+        return filepath
+    else:
+        return None
+
+
+def save_image_with_counter(img, save_dir, marker_id, counter_dict, prefix="triggered_object", file_extension=".jpg"):
+    """
+    마커 ID와 카운터를 사용하여 이미지를 저장합니다.
+    
+    Parameters
+    ----------
+    img : np.ndarray
+        저장할 이미지
+    save_dir : str
+        저장할 디렉토리 경로
+    marker_id : int or str
+        마커 ID
+    counter_dict : dict
+        마커 ID별 카운터를 저장하는 딕셔너리 (참조로 전달)
+    prefix : str, default="triggered_object"
+        파일명 접두사
+    file_extension : str, default=".jpg"
+        파일 확장자
+    
+    Returns
+    -------
+    str or None
+        저장된 파일의 전체 경로. 실패 시 None
+    """
+    import os
+    import cv2
+    
+    if img is None:
+        return None
+    
+    # 디렉토리가 없으면 생성
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    
+    # 카운터 증가
+    if marker_id not in counter_dict:
+        counter_dict[marker_id] = 0
+    counter_dict[marker_id] += 1
+    
+    # 파일명 생성
+    filename = "{}{}_{}{}".format(prefix, marker_id, counter_dict[marker_id], file_extension)
+    filepath = os.path.join(save_dir, filename)
+    
+    # 이미지 저장
+    success = cv2.imwrite(filepath, img)
+    
+    if success:
+        return filepath
+    else:
+        return None
+
+
+def should_capture_frame(frame_index, last_capture_index, interval=30):
+    """
+    이전 캡처 이후 일정 프레임 간격이 지났는지 확인합니다.
+    
+    Parameters
+    ----------
+    frame_index : int
+        현재 프레임 인덱스
+    last_capture_index : int
+        마지막 캡처 프레임 인덱스
+    interval : int, default=30
+        캡처 간격 (프레임 수)
+    
+    Returns
+    -------
+    bool
+        캡처해야 하면 True, 아니면 False
+    """
+    return (frame_index - last_capture_index) >= interval
+
+
+def should_capture_time(current_time, last_capture_time, cooldown=5.0):
+    """
+    이전 캡처 이후 일정 시간(초)이 지났는지 확인합니다.
+    
+    Parameters
+    ----------
+    current_time : float
+        현재 시간 (time.time() 값)
+    last_capture_time : float
+        마지막 캡처 시간 (time.time() 값)
+    cooldown : float, default=5.0
+        쿨다운 시간 (초)
+    
+    Returns
+    -------
+    bool
+        캡처해야 하면 True, 아니면 False
+    """
+    return (current_time - last_capture_time) >= cooldown
