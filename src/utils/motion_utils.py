@@ -81,3 +81,38 @@ def compute_circle_duration(diameter, speed):
     
     return duration
 
+
+def compute_circle_angular_speed(diameter, curvature, speed, arrow="left"):
+    """
+    원형 주행을 위한 각속도를 계산합니다.
+    
+    Parameters
+    ----------
+    diameter : float
+        회피 경로의 지름 (m)
+    curvature : float
+        곡률 (1.0 → 정확한 반원, 0.5 → 완만한 곡선)
+    speed : float
+        주행 속도 (m/s)
+    arrow : str, default="left"
+        회전 방향 ("left" or "right")
+    
+    Returns
+    -------
+    tuple
+        (angular_speed, radius) - 각속도 (rad/s)와 반지름 (m)
+    """
+    import numpy as np
+    curvature += np.finfo(float).eps
+    
+    # 회전 방향 부호
+    sign = 1.0 if arrow == "left" else -1.0
+    
+    # 실제 반지름 계산
+    R = (1.0 / curvature) * (diameter / 2.0)
+    
+    # 각속도(ω = v / R)
+    angular_speed = sign * (speed / R)
+    
+    return angular_speed, R
+

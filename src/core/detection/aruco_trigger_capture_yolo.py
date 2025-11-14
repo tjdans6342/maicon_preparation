@@ -16,7 +16,9 @@ if _project_root not in sys.path:
 from src.utils.marker_utils import detect_aruco_markers
 from src.utils.image_utils import save_image_with_counter
 from src.utils.pothole_utils import check_binary_image_pothole
-from src.utils.motion_utils import compute_turn_duration, compute_drive_duration, compute_circle_duration
+from src.utils.motion_utils import compute_turn_duration, compute_drive_duration, compute_circle_duration, compute_circle_angular_speed
+from src.utils.aruco_utils import check_cooldown, check_consecutive_frames, get_marker_action, normalize_action
+from src.configs.aruco_rules import ARUCO_TRIGGER_RULES
 
 # ArUco 마커를 검출해주는 전용 헬퍼 클래스 정의 (기존 호환성 유지)
 class ArucoDetector(object):
@@ -37,48 +39,33 @@ class ArucoTrigger(object):
     - 새 ID 등장(혹은 동일 ID의 n번째 등장) + 쿨다운 충족 시 pending_actions 세팅.
     - step()에서 리스트의 액션들을 순차 실행 후 다시 LANE_FOLLOW 복귀.
     """
-    def __init__(self, cmd_topic="/cmd_vel"):
-        # self.rules: 마커 ID와 등장 횟수(nth)에 따라 실행할 액션을 정의하는 규칙 테이블
-        # 형식: { marker_id: { nth: action 또는 [action들] } }
-        # 예시로 캡처 액션이 포함된 규칙들 정의
-        self.rules = {
-            0: {
-                1: [("drive", 0.25, 0.2111), ("right", 90), ("left", 90)],
-            },
-            2: {
-                1: [("drive", 0.3, 0.2111), ("right", 90)],
-                2: [("left", 0), ("drive", 0.5, 0.2111), ("left", 90)],
-            },
-            3: {
-                1: [("drive", 0.4, 0.2111), ("left", 90)], 
-                2: [("left", 0)], 
-                3: [("drive", 0.45, 0.2111), ("right", 90)],
-            },
-            # 4: {
-                # 1: [("drive", 0.3, 0.2111), ("right", 90)], 
-                # 2: [("drive", 0.2, 0.2111), ("left", 90)],
-            # },
-            5: {
-                # 1: [("drive", 0.4, 0.2111), ("right", 90)], 
-                # 2: [("drive", 0.4, 0.2111), ("left", 90)],
-                1: [("drive", 0.35, 0.2111), ("right", 90)], 
-                2: [("drive", 0.35, 0.2111), ("left", 90)],
-            },
-            # 10: {
-            #     1: [("drive", 0.25, 0.2111), ("right", 90)],
-            # },
-            "pothole": {  # 🔸 포트홀 감지 시 트리거할 규칙
-                # 1: [("circle", 0.3, 1.0, 0.1, "left"), ("drive", 0.2, 0.15)]
-                1: [("drive", 0.00, 0.2111), ("right", 90), ("circle", 0.30, 1.0, 0.2, "left"), ("right", 90)],
-                2: [("drive", 0.00, 0.2111), ("right", 90), ("circle", 0.30, 1.0, 0.2, "left"), ("right", 90)],
-                3: [("drive", 0.00, 0.2111), ("left", 90), ("circle", 0.30, 1.0, 0.2, "right"), ("left", 90)],
-            }
-        }
+    def __init__(self, cmd_topic="/cmd_vel", motor_interface=None, rules=None):
+        """
+        Parameters
+        ----------
+        cmd_topic : str, default="/cmd_vel"
+            ROS 토픽 이름 (motor_interface가 None일 때만 사용)
+        motor_interface : MotorInterface, optional
+            모터 제어 인터페이스. None이면 자동으로 ROSMotorController 생성
+        rules : dict, optional
+            마커 트리거 규칙. None이면 기본 규칙 사용
+        """
+        # 리팩토링: 규칙을 설정 파일에서 로드
+        self.rules = rules if rules is not None else ARUCO_TRIGGER_RULES
 
         # ArUco 마커 검출 헬퍼 객체 생성
         self.detector = ArucoDetector()
-        # 로봇 속도 명령을 publish하는 ROS Publisher 생성
-        self.drive_pub = rospy.Publisher(cmd_topic, Twist, queue_size=1)
+        
+        # 리팩토링: MotorInterface 사용 (기존 호환성 유지)
+        if motor_interface is None:
+            from platform.ros.ros_motor_controller import ROSMotorController
+            self.motor = ROSMotorController(topic_name=cmd_topic)
+            # 기존 코드 호환성을 위해 drive_pub 유지 (향후 제거 가능)
+            self.drive_pub = rospy.Publisher(cmd_topic, Twist, queue_size=1)
+        else:
+            self.motor = motor_interface
+            # motor_interface 사용 시 drive_pub은 None
+            self.drive_pub = None
 
         # 현재 모드 초기화: 기본은 차선 따라가기 모드(LANE_FOLLOW)
         self.mode = "LANE_FOLLOW"
@@ -233,26 +220,24 @@ class ArucoTrigger(object):
             if k != mid:
                 self._consec[k] = 0
 
-        # 설정한 연속 프레임 횟수 미만이면 트리거하지 않고 대기
-        if self._consec[mid] < self.required_consecutive:
+        # 리팩토링: 유틸 함수 사용
+        if not check_consecutive_frames(mid, self.required_consecutive, self._consec):
             return False
 
-        # 쿨다운 체크: 마지막 트리거 시각과 비교
-        last = self.last_trigger_times.get(mid, 0.0)
-        cooldown = self.cooldown_per_id.get(mid, self.cooldown_default)
-        if (now - last) < cooldown:
+        # 리팩토링: 유틸 함수 사용
+        if not check_cooldown(mid, self.last_trigger_times, self.cooldown_per_id, self.cooldown_default):
             return False
 
         # 등장 횟수(nth) 갱신
         nth = self.seen_counts.get(mid, 0) + 1
         self.seen_counts[mid] = nth
 
-        # 규칙에 해당 (marker id와 nth 조합)하는 액션이 정의되어 있다면 실행
-        if mid in self.rules and nth in self.rules[mid]:
-            actions = self.rules[mid][nth]
+        # 리팩토링: 유틸 함수 사용
+        actions = get_marker_action(self.rules, mid, nth)
+        if actions:
             print("actoions info:", mid, nth)
-            if isinstance(actions, tuple):
-                actions = [actions]
+            # 리팩토링: 유틸 함수 사용
+            actions = normalize_action(actions)
             # pending_actions 리스트에 액션들 저장하고 모드 전환
             self.pending_actions = list(actions)
             self.mode = "EXECUTE_ACTION"
@@ -313,23 +298,20 @@ class ArucoTrigger(object):
         return False
 
     # _rotate_in_place: 주어진 방향과 각도로 로봇을 제자리 회전
-    # 리팩토링: motion_utils 함수 사용
+    # 리팩토링: MotorInterface 사용
     def _rotate_in_place(self, direction, degrees, ang_speed=1.0):
-        msg = Twist()
-        msg.linear.x = 0.0  # 회전만 할 것이므로 직진속도 0
-        
         # 회전 각도 결정
         if direction == "right":
-            msg.angular.z = -abs(ang_speed)
+            angular_speed = -abs(ang_speed)  # rad/s
             angle = abs(degrees)
         elif direction == "left":
-            msg.angular.z = abs(ang_speed)
+            angular_speed = abs(ang_speed)  # rad/s
             angle = abs(degrees)
         elif direction == "turn":
-            msg.angular.z = abs(ang_speed)
+            angular_speed = abs(ang_speed)  # rad/s
             angle = 120.0  # 고정 각도
         elif direction == "turn1":
-            msg.angular.z = -abs(ang_speed)
+            angular_speed = -abs(ang_speed)  # rad/s
             angle = abs(degrees)
         else:
             # 정의되지 않은 방향 명령은 무시
@@ -338,19 +320,27 @@ class ArucoTrigger(object):
         # 리팩토링: 유틸 함수로 회전 시간 계산
         duration = compute_turn_duration(angle, ang_speed)
 
-        rate = rospy.Rate(20)  # 20 Hz로 명령 퍼블리시
-        t0 = rospy.Time.now().to_sec()
-        # duration 동안 회전 명령을 계속 퍼블리시
-        while (rospy.Time.now().to_sec() - t0) < duration and (not rospy.is_shutdown()):
-            self.drive_pub.publish(msg)
-            rate.sleep()
-        # 회전 종료 후 정지 명령 한 번 퍼블리시
-        self.drive_pub.publish(Twist())
+        # 리팩토링: MotorInterface 사용
+        if self.motor:
+            self.motor.set_linear_angular(0.0, angular_speed)
+            rospy.sleep(duration)
+            self.motor.stop()
+        else:
+            # 기존 방식 (호환성 유지)
+            msg = Twist()
+            msg.linear.x = 0.0
+            msg.angular.z = angular_speed
+            rate = rospy.Rate(20)
+            t0 = rospy.Time.now().to_sec()
+            while (rospy.Time.now().to_sec() - t0) < duration and (not rospy.is_shutdown()):
+                self.drive_pub.publish(msg)
+                rate.sleep()
+            self.drive_pub.publish(Twist())
 
     def _drive_distance(self, distance=1.0, speed=0.1):
         """
             지정한 거리(m)만큼 지정 속도(m/s)로 직진 주행하는 함수.
-            리팩토링: motion_utils 함수 사용
+            리팩토링: MotorInterface 사용
 
             Parameters
             ----------
@@ -359,81 +349,81 @@ class ArucoTrigger(object):
             speed : float
                 주행 속도 (단위 : m/s)
         """
-        msg = Twist()
-        msg.linear.x = speed
-        msg.angular.z = 0.0
-
         # 리팩토링: 유틸 함수로 주행 시간 계산
         duration = compute_drive_duration(distance, speed)
 
-        rate = rospy.Rate(20)  # 20Hz 퍼블리시
-        start_time = rospy.Time.now().to_sec()
-
-        # 지정된 시간 동안 속도 명령 퍼블리시
-        while (rospy.Time.now().to_sec() - start_time) < duration and not rospy.is_shutdown():
-            self.drive_pub.publish(msg)
-            rate.sleep()
-
-        # 정지 명령
-        self.drive_pub.publish(Twist())
+        # 리팩토링: MotorInterface 사용
+        if self.motor:
+            self.motor.set_linear_angular(speed, 0.0)
+            rospy.sleep(duration)
+            self.motor.stop()
+        else:
+            # 기존 방식 (호환성 유지)
+            msg = Twist()
+            msg.linear.x = speed
+            msg.angular.z = 0.0
+            rate = rospy.Rate(20)
+            start_time = rospy.Time.now().to_sec()
+            while (rospy.Time.now().to_sec() - start_time) < duration and not rospy.is_shutdown():
+                self.drive_pub.publish(msg)
+                rate.sleep()
+            self.drive_pub.publish(Twist())
+        
         rospy.loginfo("[ArucoTrigger] Drove {:.2f}m at {:.2f}m/s".format(distance, speed))
 
     def _drive_circle(self, diameter=0.3, curvature=1.0, speed=0.1, arrow="left"):
         """
         포트홀 회피용 반원형 주행 동작 (곡률 기반 기하학적 계산)
-        - diameter: 회피 경로의 지름 (m)
-        - curvature: 곡률 (1.0 → 정확한 반원, 0.5 → 완만한 곡선)
-        - speed: 주행 속도 (m/s)
-        - arrow: 회전 방향 ("left" or "right")
+        리팩토링: MotorInterface 사용
+        
+        Parameters
+        ----------
+        diameter : float
+            회피 경로의 지름 (m)
+        curvature : float
+            곡률 (1.0 → 정확한 반원, 0.5 → 완만한 곡선)
+        speed : float
+            주행 속도 (m/s)
+        arrow : str
+            회전 방향 ("left" or "right")
         """
-        rate = rospy.Rate(20)
-        curvature += np.finfo(float).eps
-
-        # 회전 방향 부호
-        sign = 1.0 if arrow == "left" else -1.0
-
-
-        # ① 실제 반지름 계산
-        # curvature가 1.0이면 완전 반원, 0.5면 2배 더 큰 원(곡률이 작을수록 완만)
-        # R = (diameter / 2.0) / (curvature + 0.0000001)
-        R = (1.0 / curvature) * (diameter / 2.0)
-
-
-        # ② 각속도(ω = v / R)
-        angular_speed = sign * (speed / R)
-
-
-        # ③ 반원 주행 시간 계산
         # 리팩토링: 유틸 함수 사용
+        angular_speed, R = compute_circle_angular_speed(diameter, curvature, speed, arrow)
         duration = compute_circle_duration(diameter, speed)
-
 
         rospy.loginfo(
             "[ArucoTrigger] Circular avoidance start: dir={}, diam={}, curv={}, R={:.3f}m, duration={:.2f}s".format(arrow, diameter, curvature, R, duration)
         )
 
-        msg = Twist()
-        msg.linear.x = speed
-        msg.angular.z = angular_speed
-
-        t_start = rospy.Time.now().to_sec()
-        while (rospy.Time.now().to_sec() - t_start) < duration and not rospy.is_shutdown():
-            self.drive_pub.publish(msg)
-            rate.sleep()
-
-
-        # ④ 종료 (정지)
-        self.drive_pub.publish(Twist())
-        rospy.sleep(0.1)  # 🔸 짧은 완충 시간 (덜컥 방지)
+        # 리팩토링: MotorInterface 사용
+        if self.motor:
+            self.motor.set_linear_angular(speed, angular_speed)
+            rospy.sleep(duration)
+            self.motor.stop()
+            rospy.sleep(0.1)  # 짧은 완충 시간
+        else:
+            # 기존 방식 (호환성 유지)
+            msg = Twist()
+            msg.linear.x = speed
+            msg.angular.z = angular_speed
+            rate = rospy.Rate(20)
+            t_start = rospy.Time.now().to_sec()
+            while (rospy.Time.now().to_sec() - t_start) < duration and not rospy.is_shutdown():
+                self.drive_pub.publish(msg)
+                rate.sleep()
+            self.drive_pub.publish(Twist())
+            rospy.sleep(0.1)
+        
         rospy.loginfo("[ArucoTrigger] Finished circular avoidance ({}), curvature={}".format(arrow, curvature))
-
-
 
     # step: EXECUTE_ACTION 모드에서 pending_actions의 액션들을 순차적으로 실행
     def step(self):
         if self.mode == "EXECUTE_ACTION" and self.pending_actions:
             # 우선 로봇 정지(속도 0) 명령으로 잠깐 멈춤
-            self.drive_pub.publish(Twist())
+            if self.motor:
+                self.motor.stop()
+            elif self.drive_pub:
+                self.drive_pub.publish(Twist())
             rospy.sleep(0.15)
 
             # 실행할 액션 하나 꺼내기

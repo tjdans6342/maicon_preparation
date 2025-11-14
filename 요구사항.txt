@@ -1,0 +1,2989 @@
+콘텐츠로 건너뛰기
+나의 말:
+https://github.com/tjdans6342/maicon_preparation
+-----
+이 프로젝트의 구조와 코드를 모두 인지하고 있어봐. 그리고, 해당 프로젝트의 src/core/detection/aruco_trigger.py 에 있는 걸 아래의 aruco_trigger_capture_yolo.py라는 형식으로 바꾸고 싶거든 (근데 이게 바로 코드를 붙여 넣으면 돌아가는 구조는 아닐 거야. 로직은 따라하되 구조는 현재 내가 준 프로젝트 구조에 맞춰야 해) 그리고 image_yolo.py라는 파일도 필요해서 그것도 적당한 곳에 넣으려고 해. (이것도 내 프로젝트 구조와 맞춰서 넣어야 함) 그렇게 했을 때 내 프로젝트 구조에 맞게끔 바꾼 aruco_trigger_capture_yolo.py와 image_yolo.py 코드를 작성해줘!!
+
+# aruco_trigger_capture_yolo.py 코드
+# -*- coding: utf-8 -*-
+
+#!/usr/bin/env python
+import rospy, time, math, os
+import cv2
+import numpy as np
+from cv_bridge import CvBridge
+from pyzbar import pyzbar
+from geometry_msgs.msg import Twist
+
+
+# OpenCV 버전에 따라 ArUco API 이름이 다른 경우가 있어서, 예외 처리를 통해 호환성 확보
+try:
+    # DICT_4X4_50: 4x4 비트 패턴, 50개의 서로 다른 마커가 정의된 사전(dictionary)
+    ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+# 만약 해당 속성이 없다면(구버전), 다른 이름의 API로 대체
+except AttributeError:
+    ARUCO_DICT = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)
+
+try:
+    ARUCO_PARAMS = cv2.aruco.DetectorParameters_create()
+except AttributeError:
+    ARUCO_PARAMS = cv2.aruco.DetectorParameters()
+
+
+# ArUco 마커를 검출해주는 전용 헬퍼 클래스 정의
+class ArucoDetector(object):
+    # 생성자: CvBridge를 초기화하여 ROS 이미지 <-> OpenCV 이미지를 변환 가능하게 함 -> ROS에서 받아온 sensor_msgs/CompressedImage를 OpenCV가 처리할 수 있는 numpy 배열로 바꿔야만 마커를 찾을 수 있기 때문
+    def __init__(self):
+        self.bridge = CvBridge()
+
+    # BGR 이미지(bgr_img)를 입력받아,
+    #  - id: 마커 ID
+    #  - center: (x, y) 중심 좌표
+    #  - area: 마커의 대략적인 면적(픽셀 단위)
+    # 를 담은 딕셔너리 리스트를 반환하는 함수
+    def detect_ids(self, bgr_img):
+        """ bgr_img에서 (id, center(x,y), 면적) 리스트 반환 """
+        # 컬러 이미지를 그레이스케일로 변환 (마커 검출은 보통 흑백으로 수행)
+        gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
+
+        # ArUco 마커 검출 수행
+        # corners: 각 마커의 꼭짓점 좌표들
+        # ids: 각 마커의 ID 배열
+        # _ : 사용하지 않는 리턴값(검출된 리젝트 포인트 등)
+        corners, ids, _ = cv2.aruco.detectMarkers(gray, ARUCO_DICT, parameters=ARUCO_PARAMS)
+
+        # 최종 결과를 담을 리스트 초기화
+        results = []
+
+        # 마커가 하나라도 검출된 경우에만 처리
+        if ids is not None:
+            # ids는 (N,1) 형태일 수 있으므로 1차원 배열로 평탄화
+            ids = ids.flatten()
+            # corners와 ids를 함께 순회하면서 각 마커에 대한 정보 계산
+            for c, i in zip(corners, ids):
+                # c는 (1,4,2) 형태이므로 (4,2)로 reshape: 마커 4개의 꼭짓점 (x,y)
+                # (1,4,2) 형태 : 첫 번째 차원(1)은 마커별 묶음, 두 번째 차원(4)은 꼭짓점 개수, 세 번째 차원(2)은 (x, y) 좌표. 
+                pts = c.reshape(-1, 2)  # 4x2
+
+                # x좌표들의 평균 -> 중심 x 좌표
+                cx = float(np.mean(pts[:, 0]))
+                # y좌표들의 평균 -> 중심 y 좌표
+                cy = float(np.mean(pts[:, 1]))
+
+                # 가로 길이는 x좌표 최댓값 - 최솟값
+                w = float(np.max(pts[:, 0]) - np.min(pts[:, 0]))
+                # 세로 길이는 y좌표 최댓값 - 최솟값
+                h = float(np.max(pts[:, 1]) - np.min(pts[:, 1]))
+
+                # 사각형으로 근사한 면적 = w * h (절댓값으로 안정성 확보)
+                area = abs(w * h)
+
+                # id, center, area 정보를 딕셔너리로 묶어서 리스트에 추가
+                results.append({"id": int(i), "center": (cx, cy), "area": area})
+
+        # 모든 마커에 대한 정보를 담은 리스트 반환
+        return results
+
+
+# ArucoTrigger: ArUco 마커를 감지해서 로봇의 행동을 트리거하는 핵심 클래스
+class ArucoTrigger(object):
+    """
+    - LANE_FOLLOW 상태에서만 마커를 감지해 트리거.
+    - 새 ID 등장(혹은 동일 ID의 n번째 등장) + 쿨다운 충족 시 pending_actions 세팅.
+    - step()에서 리스트의 액션들을 순차 실행 후 다시 LANE_FOLLOW 복귀.
+    """
+
+    # 생성자: cmd_topic은 로봇 속도를 publish할 ROS 토픽 이름
+    def __init__(self, cmd_topic="/cmd_vel"):
+        # self.rules: 마커 ID와 등장 횟수(nth)에 따라 실행할 액션을 정의하는 규칙 테이블
+        # 형식: { marker_id: { nth: action 또는 [action들] } }
+        # 여기서는 예시로 캡처 액션을 포함한 규칙들이 정의되어 있음
+        self.rules = {
+            # 캡처 액션 포함 예시
+            # id=0 마커가 1번째 등장할 때: 오른쪽 90도 회전, 2번째 등장할 때: 오른쪽 20도 회전 후 YOLO 위한 이미지 캡쳐
+            0: {1: [("right", 90)], 2: [("right", 20), ("yolo_capture", 0)]},
+            # id=2 마커가 1번째 등장할 때: 오른쪽 90도 회전
+            2: {1: ("right", 90)},
+            # id=3 마커가 1번째 등장할 때: 왼쪽 90도 회전 후 캡처,
+            3: {1: [("left", 90), ("capture", 0)], 2: ("right", 90)},
+            # id=4 마커가 2번째 등장할 때: 왼쪽 90도 회전
+            4: {2: ("left", 90)},
+        }
+
+        # ArUco 마커를 실제로 검출하는 헬퍼 객체
+        self.detector = ArucoDetector()
+
+        # 로봇의 속도 명령(Twist)을 publish하는 ROS Publisher
+        self.drive_pub = rospy.Publisher(cmd_topic, Twist, queue_size=1)
+
+        # 현재 동작 모드: 기본은 차선 따라가기(LANE_FOLLOW)
+        self.mode = "LANE_FOLLOW"
+
+        # 앞으로 실행할 액션들(action 튜플 리스트)을 담아두는 큐 역할 리스트
+        self.pending_actions = []
+
+        # 각 마커 ID별로 지금까지 몇 번 등장했는지 카운트하는 딕셔너리 {id: nth}
+        self.seen_counts = {}
+
+        # 마커별 쿨다운 설정: 같은 마커가 너무 자주 트리거되지 않도록 제한
+        # 기본 쿨다운 시간(초) – 특정 id에 대한 설정이 없을 때 사용하는 값
+        # 마커가 한 번 감지된 직후에 바로 다시 보이거나, 카메라 흔들림 때문에 같은 마커가 여러 번 인식되는 경우가 있음. 그런 상황에서 매 프레임마다 회전/캡처를 실행하면 로봇이 계속 같은 동작을 반복해 버림. 그래서 ID마다 “쿨다운 시간”을 두고, 최근에 그 마커를 처리한 시간이 cooldown보다 가까우면 이번 감지는 무시.
+        self.cooldown_default = 5.0
+
+        # 각 마커 id에 대해 별도의 쿨다운 시간을 부여하는 딕셔너리
+        # 예: id=0은 6.5초, id=2는 1.0초 등
+        self.cooldown_per_id = {0: 6.5, 2: 1.0, 3: 4.0, 4: 1.0}
+
+        # 각 마커 id가 마지막으로 트리거된 시간을 기록하는 딕셔너리 {id: last_trigger_time}
+        self.last_trigger_times = {} # 나중에 "now - last"가 쿨다운 시간보다 크면 다시 실행을 허용하고, 그렇지 않으면 무시
+
+        # 캡처 관련 설정
+        # 화재 건물 이미지를 저장할 디렉토리 경로 설정
+        # os.path.expanduser를 사용해 ~ 를 실제 홈 디렉토리로 확장
+        self.save_dir = os.path.expanduser("~/catkin_ws/src/ROKAF_Autonomous_Car_2025/images")
+
+        # 디렉토리가 존재하지 않으면 새로 생성
+        if not os.path.exists(self.save_dir):
+            os.makedirs(self.save_dir)
+            # 디렉토리를 새로 만들었다는 정보를 ROS 로그로 출력
+            rospy.loginfo("[ArucoTrigger] Created directory: %s", self.save_dir)
+        
+        # YOLO 추론용 캡쳐 이미지를 저장할 디렉토리
+        self.yolo_save_dir = os.path.expanduser(
+            "~/catkin_ws/src/ROKAF_Autonomous_Car_2025/yolo_images"
+        )
+        if not os.path.exists(self.yolo_save_dir):
+            os.makedirs(self.yolo_save_dir)
+            rospy.loginfo("[ArucoTrigger] Created YOLO directory: %s", self.yolo_save_dir)
+
+        # 화재 건물 캡쳐용 카운터 (기존)
+        self.capture_count = {}  # {id: count}
+
+        # YOLO 캡쳐용 카운터
+        self.yolo_capture_count = {}  # {id: count}
+
+        # 이미지 저장을 위해 마지막으로 감지된 프레임을 저장할 변수 -> 회전·캡처 시퀀스가 끊기거나, 회전 명령 도중 새로운 프레임이 들어와 버리는 등 타이밍이 꼬이는 것을 막기 위해, “가장 최근에 본 장면”을 저장하는 방식으로 구현
+        # observe_and_maybe_trigger에서 최신 bgr_img를 계속 업데이트해줌
+        self._last_bgr_img = None
+
+        # 마지막으로 감지된 유효한 마커 ID를 저장
+        # 캡처할 때 파일 이름에 마커 ID를 포함하기 위해 사용
+        self._last_marker_id = None # 캡처 이미지에 사용할 마커 ID 저장
+
+        # 연속 프레임에서 몇 번 이상 같은 마커가 조건을 만족해야
+        # "진짜로 본 것"으로 인정할지에 대한 임계값 (노이즈 제거용)
+        self.required_consecutive = 3
+
+        # 각 마커 id에 대해 현재 연속으로 몇 프레임 동안 조건을 만족했는지 카운트하는 딕셔너리
+        self._consec = {}
+
+        # 최소 면적 임계값: 너무 작은 마커(너무 멀거나 노이즈)는 무시
+        self.min_area = 80.0
+
+        # 화면 y좌표의 최소값: 너무 위쪽(또는 아래쪽)을 잘라내기 위한 gate
+        self.min_y = 60.0
+
+        # 화면 y좌표의 최대값: 이 값을 초과하면 관심 영역 밖으로 간주
+        self.max_y = 460.0
+
+        # QR 코드 식별기(py zbar 기반)
+        self.qr_detector = True
+        self._qr_last_logged = {}
+        self.qr_log_cooldown = 1.0  # 동일 QR 텍스트를 너무 자주 찍지 않도록 제한
+        try:
+            import pyzbar  # noqa: F401
+        except ImportError as exc:
+            rospy.logwarn('[ArucoTrigger] pyzbar not available: %s', exc)
+            self.qr_detector = False
+
+
+    # _gate: 하나의 검출(det)에 대해 "이걸 유효한 마커로 볼 것인가?"를 결정하는 함수
+    # det는 {"id": ..., "center": (cx, cy), "area": ...} 구조의 딕셔너리
+    def _gate(self, det):
+        # 면적 조건: det["area"]가 최소 면적 이상인지 검사
+        area_ok = det["area"] >= self.min_area
+
+        # y좌표를 center에서 가져옴 (center는 (x,y) 튜플)
+        y = det["center"][1]
+
+        # y좌표가 min_y 이상이고 max_y 이하인지 확인
+        # 즉, 세로 위치가 지정된 관심 구역 안에 있는지 판단
+        y_ok = (y >= self.min_y) and (y <= self.max_y)
+
+        # 두 조건(면적, y범위)을 모두 만족해야 True
+        return area_ok and y_ok
+
+
+    # _capture_image: 마지막으로 저장된 프레임과 마지막 마커 ID를 이용해서 실제 이미지 파일을 저장
+    def _capture_image(self):
+        """저장된 마지막 프레임과 마커 ID를 사용하여 이미지를 캡처합니다."""
+        # 만약 마지막 프레임이나 마커 ID가 없다면(아직 감지된 적 없음),
+        # 캡처를 진행하지 않고 경고 로그만 남김
+        if self._last_bgr_img is None or self._last_marker_id is None:
+            rospy.logwarn("[ArucoTrigger] Cannot capture image: last frame or ID is missing.")
+            return
+
+        # mid: 마지막으로 감지된 마커 ID
+        mid = self._last_marker_id
+
+        # 캡처 카운트를 증가시키고, 해당 마커 ID에 대한 누적 저장 횟수를 관리
+        # 처음 보는 mid라면 딕셔너리에 0으로 초기화
+        if mid not in self.capture_count:
+            self.capture_count[mid] = 0
+
+        # 해당 마커 ID에 대한 캡처 횟수를 1 증가
+        self.capture_count[mid] += 1
+
+        # 파일 이름을 "triggered_object<ID>_<번호>.jpg" 형태로 구성
+        # 예: triggered_object3_1.jpg (id=3, 첫 번째 캡처)
+        filename = os.path.join(self.save_dir, "triggered_object{}_{}.jpg".format(mid, self.capture_count[mid]))
+
+        # OpenCV의 imwrite로 실제 이미지 파일을 디스크에 저장
+        cv2.imwrite(filename, self._last_bgr_img)
+
+        # 저장 완료를 ROS 로그에 출력
+        rospy.loginfo("[ArucoTrigger] Triggered image saved: {}".format(filename))
+
+    # YOLO 추론용 캡쳐: 별도의 디렉토리에 yolo_{ID}_{번호}.jpg 형식으로 저장
+    def _capture_yolo_image(self):
+        """YOLO 추론용 이미지를 별도 디렉토리에 저장합니다."""
+        if self._last_bgr_img is None or self._last_marker_id is None: # self._last_bgr_img(가장 최근 카메라 프레임)과 self._last_marker_id(그 프레임에서 인정된 마커 ID)가 둘 다 있어야 캡처가 가능
+            rospy.logwarn("[ArucoTrigger] Cannot YOLO-capture image: last frame or ID is missing.")
+            return
+
+        # 현재 마커 ID를 가져와 self.yolo_capture_count 사전에서 해당 ID의 저장 횟수를 1 증가
+        mid = self._last_marker_id
+        if mid not in self.yolo_capture_count:
+            self.yolo_capture_count[mid] = 0
+        self.yolo_capture_count[mid] += 1
+
+        # 파일명 규칙: yolo_{markerID}_{순번}.jpg
+        # 예를 들어 ID=3, 세 번째 캡처라면 yolo_3_3.jpg.
+        filename = os.path.join(
+            self.yolo_save_dir,
+            "yolo_{}_{}.jpg".format(mid, self.yolo_capture_count[mid])
+        )
+
+        # 실제 이미지를 디스크에 쓰고, 성공 시 ROS 로그에 [ArucoTrigger] YOLO image saved: ... 메시지를 남김. 이렇게 쌓인 이미지는 yolo_image.py가 폴더를 감시하며 자동으로 추론에 사용.
+        cv2.imwrite(filename, self._last_bgr_img)
+        rospy.loginfo("[ArucoTrigger] YOLO image saved: {}".format(filename))
+    
+    # observe_and_maybe_trigger:
+    #  - 매 프레임마다 호출되어, 현재 모드가 LANE_FOLLOW일 때 ArUco 마커를 감지
+    #  - 조건을 만족하면 self.pending_actions에 액션들을 쌓고 모드를 EXECUTE_ACTION으로 변경
+    def observe_and_maybe_trigger(self, bgr_img):
+        # 가장 최근 프레임을 저장합니다. (step()에서 캡처 액션을 위해 사용)
+        # 캡처 시점에는 카메라 콜백이 이미 지나갔을 수 있으므로, 여기서 항상 최신 프레임을 보관
+        self._last_bgr_img = bgr_img
+        self._process_qr_codes(bgr_img)
+
+        # 현재 모드가 LANE_FOLLOW가 아닐 경우(이미 액션 수행 중 등),
+        # 새롭게 마커를 트리거하지 않고 바로 반환
+        if self.mode != "LANE_FOLLOW":
+            return
+
+        # 현재 시간(초)을 얻어 쿨다운 계산 등에 사용
+        now = time.time()
+
+        # 현재 프레임에서 ArUco 마커들을 검출
+        dets = self.detector.detect_ids(bgr_img)
+
+        # 아무 마커도 검출되지 않았다면, 연속 카운트를 초기화하고, 마지막 마커 id도 초기화 후 반환
+        if not dets:
+            self._consec = {}
+            self._last_marker_id = None
+            return
+
+        # 검출된 마커들 중에서 _gate 조건(면적, y범위)을 통과하는 것만 남긴다
+        dets = [d for d in dets if self._gate(d)]
+
+        # gate를 통과한 마커가 없다면, 연속 카운트와 마지막 마커 id를 초기화 후 반환
+        if not dets:
+            self._consec = {}
+            self._last_marker_id = None
+            return
+
+        # 여러 개가 남았다면, 면적이 가장 큰(보통 카메라에 가장 가깝거나 확실한) 마커 하나를 선택
+        det = max(dets, key=lambda x: x["area"])
+
+        # 선택된 마커의 id를 mid에 저장
+        mid = det["id"]
+
+        # 마지막으로 감지된 유효 마커 ID를 저장합니다.
+        # 이후 캡처 이미지 파일 이름 등에 사용됨
+        self._last_marker_id = mid
+
+        # 기존의 self.capture_target_ids를 이용한 이미지 저장 로직은 제거됨
+        # (지금은 rules와 capture 액션에 따라 캡처를 트리거)
+
+        # 연속 프레임 카운트:
+        # 같은 마커 id(mid)가 연속으로 몇 프레임 동안 조건을 만족했는지 기록
+        self._consec[mid] = self._consec.get(mid, 0) + 1
+
+        # 현재 프레임에서 선택된 마커(mid)가 아닌 다른 마커들의 연속 카운트는 0으로 리셋
+        for k in list(self._consec.keys()):
+            if k != mid:
+                self._consec[k] = 0
+
+        # 아직 required_consecutive(예: 3프레임 연속) 이상 보지 못했다면,
+        # 노이즈 가능성이 있으므로 트리거하지 않고 반환
+        if self._consec[mid] < self.required_consecutive:
+            return
+
+        # 쿨다운 확인:
+        # 마지막으로 이 마커 id(mid)를 트리거한 시간과 지금(now)의 차이가
+        # 해당 마커의 쿨다운 시간보다 작으면, 아직 트리거할 수 없는 상태
+        last = self.last_trigger_times.get(mid, 0.0)
+
+        # 이 마커 id의 개별 쿨다운 시간을 가져오고, 없으면 기본값을 사용
+        cooldown = self.cooldown_per_id.get(mid, self.cooldown_default)
+
+        # (now - last)가 cooldown보다 작으면, 쿨다운이 끝나지 않았으므로 그냥 반환
+        if (now - last) < cooldown:
+            return
+
+        # 등장 횟수 카운트:
+        # 이 마커 id(mid)가 지금까지 몇 번째로 트리거 조건을 만족했는지 계산
+        nth = self.seen_counts.get(mid, 0) + 1
+
+        # 딕셔너리에 최신 등장 횟수를 반영
+        self.seen_counts[mid] = nth
+
+        # rules에서 (mid, nth) 조합에 해당하는 액션이 정의되어 있는지 확인
+        if (mid in self.rules) and (nth in self.rules[mid]):
+            # actions: 튜플 하나 또는 튜플 리스트일 수 있음
+            actions = self.rules[mid][nth]
+
+            # 만약 단일 튜플 형태라면 리스트로 감싸서 통일된 형식으로 맞춤
+            if isinstance(actions, tuple):
+                actions = [actions]
+
+            # pending_actions에 복사해 두고, 앞으로 step()에서 하나씩 실행하게 됨
+            self.pending_actions = list(actions)
+
+            # 모드를 EXECUTE_ACTION으로 바꿔서,
+            # 차선 추종이 아니라 액션 실행 루틴으로 넘어가도록 함
+            self.mode = "EXECUTE_ACTION"
+
+            # 이번에 트리거한 시간을 기록 (마커별 쿨다운 관리용)
+            self.last_trigger_times[mid] = now
+
+            # 연속 카운트는 초기화해 다음 트리거를 준비
+            self._consec = {}
+
+
+    # _rotate_in_place:
+    # 주어진 방향(direction)과 각도(degrees)에 따라 로봇을 제자리에서 회전시키는 함수
+    def _rotate_in_place(self, direction, degrees, ang_speed=1.0):
+        # Twist 메시지 생성 (선속도/각속도 명령)
+        msg = Twist()
+
+        # 회전만 할 것이므로 선속도(linear.x)는 0으로 설정
+        msg.linear.x = 0.0
+
+        # direction 값에 따라 회전 방향과 duration(얼마 동안 회전할지)을 설정
+        if direction == "right":
+            # 오른쪽 회전: z축 각속도를 음수로 설정 (좌표계 기준)
+            msg.angular.z = -abs(ang_speed)
+            # 회전 시간 = (요구 회전 각도[rad]) / 각속도[rad/s]
+            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+        elif direction == "left":
+            # 왼쪽 회전: z축 각속도를 양수로 설정
+            msg.angular.z = abs(ang_speed)
+            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+        elif direction == "turn":
+            # "turn"은 고정 각도(예: 120도)를 도는 특수 명령
+            msg.angular.z = abs(ang_speed)
+            duration = 120.0 * math.pi/180.0 / abs(ang_speed)
+        elif direction == "turn1":
+            # "turn1"은 오른쪽 회전이지만 degrees를 그대로 쓰는 모드
+            msg.angular.z = -abs(ang_speed)
+            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+        else:
+            # 정의되지 않은 direction이면 아무 것도 하지 않고 반환
+            return
+
+        # 20 Hz(초당 20번)로 publish하기 위한 ROS Rate 객체 생성
+        rate = rospy.Rate(20)
+
+        # 현재 시각을 t0로 기록
+        t0 = rospy.Time.now().to_sec()
+
+        # (현재 시간 - t0)가 duration보다 작은 동안 계속 회전 명령을 publish
+        # 동시에, 노드가 종료되지 않았는지(rospy.is_shutdown)도 체크
+        while (rospy.Time.now().to_sec() - t0) < duration and (not rospy.is_shutdown()):
+            # 회전 명령 publish
+            self.drive_pub.publish(msg)
+            # 다음 루프까지 잠시 대기 (20Hz 유지)
+            rate.sleep()
+
+        # 회전이 끝난 후에는 Twist() (모든 속도 0) 를 publish해서 로봇을 정지시킴
+        self.drive_pub.publish(Twist())
+
+
+    # step:
+    #  - mode가 EXECUTE_ACTION일 때, pending_actions에 쌓여 있는 액션들을 하나씩 꺼내 실행
+    #  - 모든 액션이 끝나면 다시 LANE_FOLLOW 모드로 복귀
+    def step(self):
+        # 현재 모드가 EXECUTE_ACTION이고, 실행할 pending_actions가 남아있는 경우에만 수행
+        if self.mode == "EXECUTE_ACTION" and self.pending_actions:
+            # 액션 실행 전에 잠깐 정지 명령을 보내서 움직임을 안정화
+            self.drive_pub.publish(Twist()) # 속도를 0으로 만든 Twitst 메시지 publish해서 로봇 잠깐 정지
+
+            # 약간의 시간(0.15초) 대기 – 로봇이 완전히 멈출 시간을 주기 위함
+            rospy.sleep(0.15)
+
+            # pending_actions 리스트에서 맨 앞의 액션 하나를 꺼냄
+            # action 형식: (direction, degrees)
+            direction, deg = self.pending_actions.pop(0)
+
+            # 캡처 액션 처리:
+            # direction 문자열이 "capture"라면 회전이 아니라 이미지 저장을 수행
+            if direction == "capture":
+                # 화재 건물용 캡쳐
+                self._capture_image()
+            elif direction == "yolo_capture":
+                # YOLO 추론용 캡쳐
+                self._capture_yolo_image()
+            else:
+                # 그 외의 경우("right", "left", "turn", "turn1" 등)은 회전 동작 실행
+                self._rotate_in_place(direction, deg, ang_speed=1.0)
+
+            # 이번 액션을 실행한 후, 남은 pending_actions가 없으면
+            # 모든 액션이 완료된 것이므로 모드를 다시 LANE_FOLLOW로 돌려놓음
+            if not self.pending_actions:
+                self.mode = "LANE_FOLLOW"
+
+    def _process_qr_codes(self, frame): # Yolo 버전 이슈로 안 쓰는 중
+        """
+        QR 코드를 감지하고 새로운 텍스트가 확인되면 터미널(ROS 로그)로 출력한다.
+        """
+        if self.qr_detector is None:
+            return
+
+        if not self.qr_detector:
+            return
+
+        decoded_payloads = []
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            results = pyzbar.decode(gray)
+        except Exception as exc:
+            rospy.logwarn_throttle(5.0, "[ArucoTrigger] QR detection error: %s", exc)
+            return
+
+        for obj in results:
+            data = obj.data.decode('utf-8', errors='ignore').strip() if obj.data else ''
+            if data:
+                decoded_payloads.append(data)
+
+        if not decoded_payloads:
+            return
+
+        now = time.time()
+        for text in decoded_payloads:
+            last = self._qr_last_logged.get(text, 0.0)
+            if (now - last) >= self.qr_log_cooldown:
+                rospy.loginfo("[QR] Detected payload: %s", text)
+                self._qr_last_logged[text] = now
+
+
+# image_yolo.py 코드
+import os
+import time
+from collections import defaultdict
+
+import cv2
+from ultralytics import YOLO
+
+try:
+    import torch
+except ImportError:
+    print("Warning: torch module not found. Install torch for optimal performance.")
+    torch = None
+
+# Choose inference device
+if torch and torch.cuda.is_available():
+    INFERENCE_DEVICE = 0
+    print(f"YOLO will use GPU (Device: {INFERENCE_DEVICE}).")
+else:
+    INFERENCE_DEVICE = 'cpu'
+    print("YOLO will use CPU.")
+
+# Load YOLO model
+MODEL = YOLO('config/best_rokaf.pt')
+CONFIDENCE_THRESHOLD = 0.3 # YOLO 모델이 예측한 박스의 신뢰도(confidence)가 이 값보다 낮으면 그 박스를 무시하겠다는 기준
+
+# ArUcoTrigger에서 YOLO_capture로 저장하는 디렉토리
+# (원하면 여기 경로만 바꿔주면 됨)
+IMAGE_DIR = os.path.expanduser(
+    "~/catkin_ws/src/ROKAF_Autonomous_Car_2025/yolo_images"
+)
+
+# 새 파일 체크 주기(초)
+SLEEP_SEC = 1.0
+
+
+def main():
+    # 클래스별 누적 카운트: {"car": 3, "tank": 1, ...}
+    class_counts = defaultdict(int)
+
+    # 이미 처리한(추론을 돌린) 파일 이름을 저장해두는 집합: 매번 디렉토리 스캔할 때 새 파일만 골라내기 위함.
+    processed_files = set()
+
+    if not os.path.isdir(IMAGE_DIR):
+        raise RuntimeError("Image directory does not exist: {}".format(IMAGE_DIR))
+
+    print("[YOLO] Watching directory:", IMAGE_DIR)
+    print("[YOLO] Press Ctrl+C to stop.\n")
+
+    while True:
+        # 디렉토리 안의 이미지 파일 리스트: 확장자가 jpg/jpeg/png인 파일을 모두 모으고 정렬(시간 순서 보장 목적) -> 이미지가 만들어진 순서대로 로그가 찍히고, 누적 카운트도 시간 흐름과 일관되게 올라가서 모니터링이 수월
+        filenames = [
+            f for f in os.listdir(IMAGE_DIR)
+            if f.lower().endswith((".jpg", ".jpeg", ".png"))
+        ]
+        filenames.sort()
+
+        # 아직 처리하지 않은 새 파일만 선택
+        new_files = [f for f in filenames if f not in processed_files]
+
+        if new_files:
+            for fname in new_files:
+                full_path = os.path.join(IMAGE_DIR, fname)
+                img = cv2.imread(full_path)
+
+                if img is None: # 깨진 파일에 대해 무한 경고 반복되는 거 방지하기 위함
+                    print("[WARN] Failed to read image:", full_path)
+                    processed_files.add(fname)
+                    continue
+
+                # YOLO inference(Yolo 모델로 추론 수행): 처리하지 않은 새 파일에 대해서만 YOLO 추론 수행
+                results = MODEL(img, verbose=False, device=INFERENCE_DEVICE)
+
+                # 이번 이미지에서의 클래스별 카운트
+                per_image_counts = defaultdict(int)
+
+                for r in results: # UltraLytics YOLO의 결과 각 요소는 한 장의 이미지에 대한 예측 담고 있음 -> 이를 순회
+                    if r.boxes is None:
+                        continue
+
+                    for box in r.boxes: # 감지된 각 bounding box에 대해 반복
+                        conf = float(box.conf[0]) # 해당 박스의 신뢰도 점수(confidence score)
+                        if conf < CONFIDENCE_THRESHOLD:
+                            continue # 신뢰도가 기준치보다 낮으면 무시
+
+                        class_id = int(box.cls[0])
+                        label = MODEL.names[class_id] # 클래스 이름(예: "enem", "alli") 가져옴.
+
+                        # 누적 카운트
+                        class_counts[label] += 1 # 전체 누적 수 증가
+                        per_image_counts[label] += 1 # 이번 이미지에서의 수 증가
+
+                processed_files.add(fname) # 이 파일은 처리 완료했으므로 집합에 추가
+
+                # 결과 출력: 
+                print("=== Image processed:", fname, "===")
+                if per_image_counts:
+                    print("  [per-image counts]")
+                    for label, c in sorted(per_image_counts.items()):
+                        print("   - {}: {}".format(label, c))
+                else:
+                    print("  No objects detected over conf {:.2f}".format(CONFIDENCE_THRESHOLD))
+
+                print("\n  [cumulative counts so far]")
+                for label, c in sorted(class_counts.items()):
+                    print("   - {}: {}".format(label, c))
+                print("================================\n")
+
+        # 새 이미지가 없으면 잠깐 쉼
+        time.sleep(SLEEP_SEC)
+
+
+if __name__ == "__main__":
+    main()
+ChatGPT의 말:
+좋아요! 프로젝트 구조에 맞춰서 aruco_trigger_capture_yolo.py와 image_yolo.py를 통합되도록 다시 구성하길 원하시는데, 몇 가지 확인하고 싶은 점이 있어요:
+
+현재 프로젝트의 전체 구조(폴더/모듈 위치)를 정확히 파악하려면, src/core/detection/aruco_trigger.py처럼 구체적인 구조 말고 전체 src 하위 구조나 주요 디렉토리 구성을 알려주실 수 있나요?
+
+image_yolo.py는 ROS와 통신 없이 독립적으로 YOLO 추론만 하는 파일인데, 이것도 ROS 노드 형식으로 바꾸길 원하시나요, 아니면 지금처럼 __main__ 루틴을 가진 독립 실행 파일로 유지하길 원하시나요?
+
+YOLO 모델(best_rokaf.pt)의 위치가 현재 config/best_rokaf.pt로 되어 있는데, 이 경로를 프로젝트 내 어디로 옮겨두었는지 또는 그대로 둘지 알려주세요.
+
+이 세 가지를 알려주시면 프로젝트 구조에 꼭 맞게 통합된 코드로 정리해드릴게요!
+
+나의 말:
+1. 아래가 프로젝트 구조야.
+src/
+├── configs/                       # 환경 설정(Configuration) 관련 파일
+│   └── lane_config.py             # 차선 인식 관련 파라미터 및 설정 값
+│
+├── core/                          # 핵심 로직(Core Logic) 계층
+│   ├── detection/                 # 감지(Detection) 계열 모듈
+│   │   ├── lane_detector.py       # 차선 인식 모듈
+│   │   ├── fire_detector.py       # 화재 감지 모듈
+│   │   └── aruco_trigger.py       # ArUco 마커 감지 및 이벤트 트리거
+│   │
+│   └── control/                   # 제어(Control) 계열 모듈
+│       ├── controller.py          # 전체 로봇 제어 흐름 및 상태 관리
+│       └── pid_controller.py      # PID 제어 알고리즘
+│
+├── main/                          # 시스템 실행 진입점 (Main Entry)
+│   └── robot.py                   # 전체 로봇 시스템을 통합 실행하는 메인 루프
+│
+├── utils/                         # 공통 유틸리티 모듈
+│   └── image_utils.py             # 이미지 전처리 및 보조 함수
+│
+├── .gitignore                     # Git 추적 제외 규칙
+└── README.md                      # 프로젝트 설명 문서
+-----------
+2. ROS 노드 통해서 통신하는 거야!!
+3. 적절하게 잘 구성해줘.
+------
+그리고 https://github.com/tjdans6342/maicon_preparation 여기 접근 가능하지? (가능하다는 가정하에 딥리서치 수행해줘)
+ChatGPT의 말:
+좋아요. 프로젝트 구조에 맞게 aruco_trigger_capture_yolo.py와 image_yolo.py를 ROS 노드 기반으로 리팩터링하고, 각각 적절한 위치(src/core/detection/ 및 src/core/detection/ 또는 src/utils/ 등)에 맞춰 설계하겠습니다. 기존 코드와의 통합도 고려하여 구조적으로 깔끔하게 정리하겠습니다.
+
+조금만 기다려 주세요. 작업이 완료되면 바로 알려드릴게요!
+
+Research completed in 14m· 출처 0개· 검색 37건
+Integrating YOLO Capture into ArUco Trigger Module
+To incorporate YOLO-based object detection into the project, we introduce two new components:
+Aruco Trigger with YOLO Capture – an updated ArUco detection module that triggers image captures for YOLO inference (in addition to the existing actions).
+YOLO Image Detection Script – a standalone script that continuously monitors a directory for new images and runs a YOLO model on them, logging detected objects.
+These additions fit into the project structure under src/core/detection. The ArUco trigger module will publish rotation commands and save images via ROS (as before), now including a separate directory for YOLO images. The YOLO script runs independently (as a separate node or process) to perform inference on the captured images.
+src/core/detection/aruco_trigger_capture_yolo.py
+This module extends the original aruco_trigger.py by adding a new action type "yolo_capture". It saves images to a yolo_images directory for YOLO inference, while still handling normal image captures in the images directory. Key points of this implementation include:
+Aruco Detection: Uses OpenCV’s ArUco detection (with compatibility for different OpenCV versions) to find markers in each frame. It filters out markers that are too small or out of the region of interest (using min_area and vertical position gates).
+Trigger Rules: Defines a dictionary of rules mapping marker IDs and their nth appearance to actions. For example, marker ID 0 triggers a 90° right turn on first detection, and a 20° right turn plus a YOLO image capture on second detection. A "capture" action saves an image to images, while "yolo_capture" saves to yolo_images.
+Cooldown and Debounce: Implements a cooldown period per marker ID to prevent repeated triggers in quick succession, and requires a marker to be seen in several consecutive frames (required_consecutive) before triggering (to avoid noise).
+ROS Integration: Publishes velocity commands to the robot (/cmd_vel) for rotation actions using geometry_msgs/Twist. Image captures use cv2.imwrite to save the last seen frame. The module uses ROS logging (rospy.loginfo/warn) to report events like directory creation and image saved.
+QR Code Support: (Optional) Also includes a QR code detector using pyzbar that logs QR payloads, though this does not affect the trigger actions (and can be disabled if pyzbar is unavailable).
+Below is the complete code for aruco_trigger_capture_yolo.py:
+# -*- coding: utf-8 -*-
+#!/usr/bin/env python
+
+import rospy, time, math, os
+import cv2
+import numpy as np
+from cv_bridge import CvBridge
+from pyzbar import pyzbar
+from geometry_msgs.msg import Twist
+
+# OpenCV ArUco dictionary and parameters (handle version compatibility)
+try:
+    ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+except AttributeError:
+    ARUCO_DICT = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)
+
+try:
+    ARUCO_PARAMS = cv2.aruco.DetectorParameters_create()
+except AttributeError:
+    ARUCO_PARAMS = cv2.aruco.DetectorParameters()
+
+# ArUco 마커를 검출해주는 전용 헬퍼 클래스 정의
+class ArucoDetector(object):
+    # 생성자: CvBridge를 초기화하여 ROS 이미지 <-> OpenCV 이미지를 변환 가능하게 함
+    # -> ROS에서 받아온 sensor_msgs/CompressedImage를 OpenCV가 처리할 수 있는 numpy 배열로 바꿔야만 마커를 찾을 수 있기 때문
+    def __init__(self):
+        self.bridge = CvBridge()
+
+    # BGR 이미지(bgr_img)를 입력받아
+    #  - id: 마커 ID
+    #  - center: (x, y) 중심 좌표
+    #  - area: 마커의 대략적인 면적(픽셀 단위)
+    # 를 담은 딕셔너리들의 리스트를 반환
+    def detect_ids(self, bgr_img):
+        """ bgr_img에서 (id, center(x,y), 면적) 리스트 반환 """
+        # 컬러 이미지를 그레이스케일로 변환 (마커 검출은 흑백 영상에서 수행)
+        gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
+        # ArUco 마커 검출 수행
+        # corners: 검출된 각 마커의 꼭짓점 좌표들
+        # ids: 검출된 마커들의 ID 배열
+        # _ : (unused) rejected candidates etc.
+        corners, ids, _ = cv2.aruco.detectMarkers(gray, ARUCO_DICT, parameters=ARUCO_PARAMS)
+        results = []
+        if ids is not None:
+            ids = ids.flatten()
+            # 각 검출된 마커마다 정보 추출
+            for c, i in zip(corners, ids):
+                pts = c.reshape(-1, 2)  # (4,2) shape array of corner points
+                # 마커 중심 좌표 계산 (x, y 평균)
+                cx = float(np.mean(pts[:, 0]))
+                cy = float(np.mean(pts[:, 1]))
+                # 마커의 폭과 높이 계산 (픽셀 단위)
+                w = float(np.max(pts[:, 0]) - np.min(pts[:, 0]))
+                h = float(np.max(pts[:, 1]) - np.min(pts[:, 1]))
+                # 면적을 사각형으로 근사 (w * h)
+                area = abs(w * h)
+                # id, 중심, 면적 정보를 결과 리스트에 추가
+                results.append({"id": int(i), "center": (cx, cy), "area": area})
+        return results
+
+# ArucoTrigger: ArUco 마커를 감지해서 로봇의 행동을 트리거하는 핵심 클래스
+class ArucoTrigger(object):
+    """
+    - LANE_FOLLOW 상태에서만 마커를 감지해 트리거.
+    - 새 ID 등장(혹은 동일 ID의 n번째 등장) + 쿨다운 충족 시 pending_actions 세팅.
+    - step()에서 리스트의 액션들을 순차 실행 후 다시 LANE_FOLLOW 복귀.
+    """
+    def __init__(self, cmd_topic="/cmd_vel"):
+        # self.rules: 마커 ID와 등장 횟수(nth)에 따라 실행할 액션을 정의하는 규칙 테이블
+        # 형식: { marker_id: { nth: action 또는 [action들] } }
+        # 예시로 캡처 액션이 포함된 규칙들 정의
+        self.rules = {
+            # id=0 마커: 1번째 등장 -> 오른쪽 90도 회전, 2번째 등장 -> 오른쪽 20도 회전 후 YOLO 이미지 캡처
+            0: {1: [("right", 90)], 2: [("right", 20), ("yolo_capture", 0)]},
+            # id=2 마커: 1번째 등장 -> 오른쪽 90도 회전
+            2: {1: ("right", 90)},
+            # id=3 마커: 1번째 등장 -> 왼쪽 90도 회전 후 일반 이미지 캡처, 2번째 등장 -> 오른쪽 90도 회전
+            3: {1: [("left", 90), ("capture", 0)], 2: ("right", 90)},
+            # id=4 마커: 2번째 등장 -> 왼쪽 90도 회전
+            4: {2: ("left", 90)},
+        }
+
+        # ArUco 마커 검출 헬퍼 객체 생성
+        self.detector = ArucoDetector()
+        # 로봇 속도 명령을 publish하는 ROS Publisher 생성
+        self.drive_pub = rospy.Publisher(cmd_topic, Twist, queue_size=1)
+
+        # 현재 모드 초기화: 기본은 차선 따라가기 모드(LANE_FOLLOW)
+        self.mode = "LANE_FOLLOW"
+        # 실행 대기 중인 액션 리스트 (큐로 사용)
+        self.pending_actions = []
+        # 마커 ID별 감지 횟수 기록용 딕셔너리 {id: count}
+        self.seen_counts = {}
+
+        # 마커 트리거 쿨다운 설정 (동일 마커가 연속해서 트리거되지 않도록)
+        self.cooldown_default = 5.0  # 기본 쿨다운 시간 (초)
+        self.cooldown_per_id = {0: 6.5, 2: 1.0, 3: 4.0, 4: 1.0}  # ID별 개별 쿨다운 시간
+        self.last_trigger_times = {}  # 마커 ID별 마지막 트리거 시각 기록
+
+        # 화재 건물(일반) 이미지 저장 디렉토리 설정
+        self.save_dir = os.path.expanduser("~/catkin_ws/src/ROKAF_Autonomous_Car_2025/images")
+        if not os.path.exists(self.save_dir):
+            os.makedirs(self.save_dir)
+            rospy.loginfo("[ArucoTrigger] Created directory: %s", self.save_dir)
+
+        # YOLO 추론용 이미지 저장 디렉토리 설정
+        self.yolo_save_dir = os.path.expanduser("~/catkin_ws/src/ROKAF_Autonomous_Car_2025/yolo_images")
+        if not os.path.exists(self.yolo_save_dir):
+            os.makedirs(self.yolo_save_dir)
+            rospy.loginfo("[ArucoTrigger] Created YOLO directory: %s", self.yolo_save_dir)
+
+        # 화재 건물 캡처 이미지 파일 번호 카운터
+        self.capture_count = {}   # {marker_id: count}
+        # YOLO 추론용 캡처 이미지 파일 번호 카운터
+        self.yolo_capture_count = {}  # {marker_id: count}
+
+        # 마지막으로 본 프레임과 마커 ID 저장 (캡처 시 사용)
+        self._last_bgr_img = None
+        self._last_marker_id = None
+
+        # 노이즈 제거를 위한 연속 프레임 요구 횟수
+        self.required_consecutive = 3
+        # 각 마커ID별 현재 연속 만족 프레임 횟수
+        self._consec = {}
+
+        # 마커 유효성 필터 기준
+        self.min_area = 80.0    # 최소 면적 (픽셀)
+        self.min_y = 60.0       # 검출 관심 영역의 최소 y좌표
+        self.max_y = 460.0      # 검출 관심 영역의 최대 y좌표
+
+        # QR 코드 감지기 설정 (pyzbar 이용)
+        self.qr_detector = True
+        self._qr_last_logged = {}
+        self.qr_log_cooldown = 1.0
+        try:
+            import pyzbar  # noqa: F401 (for checking availability)
+        except ImportError as exc:
+            rospy.logwarn("[ArucoTrigger] pyzbar not available: %s", exc)
+            self.qr_detector = False
+
+    # _gate: 하나의 검출 결과 det(dict)에 대해 유효한 마커로 간주할지 결정
+    def _gate(self, det):
+        # 면적 조건 확인
+        area_ok = det["area"] >= self.min_area
+        # 세로 위치 조건 확인 (min_y <= center_y <= max_y)
+        y = det["center"][1]
+        y_ok = (y >= self.min_y) and (y <= self.max_y)
+        # 두 조건을 모두 만족해야 True 반환
+        return area_ok and y_ok
+
+    # _capture_image: 마지막 저장된 프레임과 마지막 마커 ID를 사용해 이미지를 저장 (일반 캡처)
+    def _capture_image(self):
+        if self._last_bgr_img is None or self._last_marker_id is None:
+            rospy.logwarn("[ArucoTrigger] Cannot capture image: last frame or ID is missing.")
+            return
+        mid = self._last_marker_id
+        if mid not in self.capture_count:
+            self.capture_count[mid] = 0
+        self.capture_count[mid] += 1
+        filename = os.path.join(self.save_dir, "triggered_object{}_{}.jpg".format(mid, self.capture_count[mid]))
+        cv2.imwrite(filename, self._last_bgr_img)
+        rospy.loginfo("[ArucoTrigger] Triggered image saved: {}".format(filename))
+
+    # _capture_yolo_image: 마지막 프레임을 별도 디렉토리에 YOLO 추론용 이미지로 저장
+    def _capture_yolo_image(self):
+        if self._last_bgr_img is None or self._last_marker_id is None:
+            rospy.logwarn("[ArucoTrigger] Cannot YOLO-capture image: last frame or ID is missing.")
+            return
+        mid = self._last_marker_id
+        if mid not in self.yolo_capture_count:
+            self.yolo_capture_count[mid] = 0
+        self.yolo_capture_count[mid] += 1
+        filename = os.path.join(self.yolo_save_dir, "yolo_{}_{}.jpg".format(mid, self.yolo_capture_count[mid]))
+        cv2.imwrite(filename, self._last_bgr_img)
+        rospy.loginfo("[ArucoTrigger] YOLO image saved: %s", filename)
+
+    # observe_and_maybe_trigger: LANE_FOLLOW 모드에서 매 프레임 호출.
+    # 아루코 마커를 감지하고 조건 충족 시 pending_actions에 액션을 넣고 모드를 EXECUTE_ACTION으로 전환.
+    def observe_and_maybe_trigger(self, bgr_img):
+        # 최신 프레임 저장 (캡처 액션에서 사용하기 위함)
+        self._last_bgr_img = bgr_img
+        # QR 코드 처리 (로그 용도)
+        self._process_qr_codes(bgr_img)
+
+        # LANE_FOLLOW 모드가 아니라면 트리거 처리 없이 종료
+        if self.mode != "LANE_FOLLOW":
+            return
+
+        now = time.time()
+        # 현재 프레임에서 ArUco 마커 검출
+        dets = self.detector.detect_ids(bgr_img)
+        if not dets:
+            # 마커 없으면 연속 감지 카운트 초기화
+            self._consec = {}
+            self._last_marker_id = None
+            return
+
+        # 유효성 조건(_gate)에 맞는 마커만 필터링
+        dets = [d for d in dets if self._gate(d)]
+        if not dets:
+            # 조건 만족 마커 없으면 초기화 후 종료
+            self._consec = {}
+            self._last_marker_id = None
+            return
+
+        # 가장 큰 마커 하나 선택 (면적이 가장 큰 것)
+        det = max(dets, key=lambda x: x["area"])
+        mid = det["id"]
+        # 마지막 감지 마커 ID 업데이트 (캡처 파일 이름 등에 사용)
+        self._last_marker_id = mid
+
+        # 연속 프레임 만족 횟수 업데이트
+        self._consec[mid] = self._consec.get(mid, 0) + 1
+        # 다른 마커들의 연속 횟수는 리셋
+        for k in list(self._consec.keys()):
+            if k != mid:
+                self._consec[k] = 0
+
+        # 설정한 연속 프레임 횟수 미만이면 트리거하지 않고 대기
+        if self._consec[mid] < self.required_consecutive:
+            return
+
+        # 쿨다운 체크: 마지막 트리거 시각과 비교
+        last = self.last_trigger_times.get(mid, 0.0)
+        cooldown = self.cooldown_per_id.get(mid, self.cooldown_default)
+        if (now - last) < cooldown:
+            return
+
+        # 등장 횟수(nth) 갱신
+        nth = self.seen_counts.get(mid, 0) + 1
+        self.seen_counts[mid] = nth
+
+        # 규칙에 해당 (marker id와 nth 조합)하는 액션이 정의되어 있다면 실행
+        if mid in self.rules and nth in self.rules[mid]:
+            actions = self.rules[mid][nth]
+            if isinstance(actions, tuple):
+                actions = [actions]
+            # pending_actions 리스트에 액션들 저장하고 모드 전환
+            self.pending_actions = list(actions)
+            self.mode = "EXECUTE_ACTION"
+            # 마지막 트리거 시각 업데이트
+            self.last_trigger_times[mid] = now
+            # 연속 카운트 리셋 (다음 트리거 대비)
+            self._consec = {}
+
+    # _rotate_in_place: 주어진 방향과 각도로 로봇을 제자리 회전
+    def _rotate_in_place(self, direction, degrees, ang_speed=1.0):
+        msg = Twist()
+        msg.linear.x = 0.0  # 회전만 할 것이므로 직진속도 0
+        if direction == "right":
+            # 오른쪽 회전 (z축 음수 각속도)
+            msg.angular.z = -abs(ang_speed)
+            # 회전 지속 시간 = 회전 각도(라디안) / 각속도(라디안/초)
+            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+        elif direction == "left":
+            # 왼쪽 회전 (z축 양수 각속도)
+            msg.angular.z = abs(ang_speed)
+            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+        elif direction == "turn":
+            # "turn": 고정 각도 (120도) 왼쪽 회전
+            msg.angular.z = abs(ang_speed)
+            duration = 120.0 * math.pi/180.0 / abs(ang_speed)
+        elif direction == "turn1":
+            # "turn1": 오른쪽 회전을 degrees만큼 수행
+            msg.angular.z = -abs(ang_speed)
+            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+        else:
+            # 정의되지 않은 방향 명령은 무시
+            return
+
+        rate = rospy.Rate(20)  # 20 Hz로 명령 퍼블리시
+        t0 = rospy.Time.now().to_sec()
+        # duration 동안 회전 명령을 계속 퍼블리시
+        while (rospy.Time.now().to_sec() - t0) < duration and (not rospy.is_shutdown()):
+            self.drive_pub.publish(msg)
+            rate.sleep()
+        # 회전 종료 후 정지 명령 한 번 퍼블리시
+        self.drive_pub.publish(Twist())
+
+    # step: EXECUTE_ACTION 모드에서 pending_actions의 액션들을 순차적으로 실행
+    def step(self):
+        if self.mode == "EXECUTE_ACTION" and self.pending_actions:
+            # 우선 로봇 정지(속도 0) 명령으로 잠깐 멈춤
+            self.drive_pub.publish(Twist())
+            rospy.sleep(0.15)
+
+            # 실행할 액션 하나 꺼내기
+            direction, deg = self.pending_actions.pop(0)
+            if direction == "capture":
+                # 일반 캡처 액션
+                self._capture_image()
+            elif direction == "yolo_capture":
+                # YOLO 추론용 캡처 액션
+                self._capture_yolo_image()
+            else:
+                # 회전 액션의 경우 (오른쪽/왼쪽/turn 등)
+                self._rotate_in_place(direction, deg, ang_speed=1.0)
+
+            # 모든 액션을 끝마치면 모드를 LANE_FOLLOW로 복귀
+            if not self.pending_actions:
+                self.mode = "LANE_FOLLOW"
+
+    def _process_qr_codes(self, frame):
+        """
+        QR 코드를 감지하고 새로운 텍스트가 확인되면 주기적으로 (cooldown 적용) 로그 출력.
+        """
+        if self.qr_detector is None:
+            return
+        if not self.qr_detector:
+            return
+
+        decoded_payloads = []
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            results = pyzbar.decode(gray)
+        except Exception as exc:
+            rospy.logwarn_throttle(5.0, "[ArucoTrigger] QR detection error: %s", exc)
+            return
+
+        for obj in results:
+            data = obj.data.decode('utf-8', errors='ignore').strip() if obj.data else ''
+            if data:
+                decoded_payloads.append(data)
+
+        if not decoded_payloads:
+            return
+
+        now = time.time()
+        for text in decoded_payloads:
+            last = self._qr_last_logged.get(text, 0.0)
+            if (now - last) >= self.qr_log_cooldown:
+                rospy.loginfo("[QR] Detected payload: %s", text)
+                self._qr_last_logged[text] = now
+src/core/detection/image_yolo.py
+This script runs alongside the robot’s main node to perform object detection on the images captured by the ArUco trigger. It monitors the yolo_images directory and uses an Ultralytics YOLO model to detect objects in each new image file. Key features of this script:
+Device Selection: Automatically uses GPU (torch.cuda.is_available()) if present, otherwise falls back to CPU.
+Model Loading: Loads a YOLO model from the specified path (here 'config/best_rokaf.pt', which should be the trained model weights file located in a config directory or accessible path).
+File Monitoring Loop: Watches the yolo_images folder for new image files (JPEG/PNG). It keeps track of already processed files to only run inference on new captures.
+YOLO Inference: For each new image, runs the YOLO model and collects detection results. It filters out detections below a confidence threshold (set by CONFIDENCE_THRESHOLD).
+Logging Results: Prints a summary of detections for each image (per-image counts of each class detected) and maintains a cumulative total count for each object class across all images processed in this session. This output goes to standard output (console), which can be observed to understand what the YOLO model is detecting in the captured images.
+Continuous Operation: The script loops indefinitely with a short sleep interval, allowing it to run continuously (e.g., as a ROS node or a standalone process) and process images as they appear. It can be stopped with Ctrl+C.
+Below is the code for image_yolo.py:
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import os
+import time
+from collections import defaultdict
+
+import cv2
+from ultralytics import YOLO
+
+# Optional: use PyTorch to check for GPU availability
+try:
+    import torch
+except ImportError:
+    print("Warning: torch module not found. Install torch for optimal performance.")
+    torch = None
+
+# Choose inference device (GPU if available, otherwise CPU)
+if torch and torch.cuda.is_available():
+    INFERENCE_DEVICE = 0  # GPU device index (0 for first GPU)
+    print(f"YOLO will use GPU (Device: {INFERENCE_DEVICE}).")
+else:
+    INFERENCE_DEVICE = 'cpu'
+    print("YOLO will use CPU.")
+
+# Load the YOLO model (assuming the model weights are at 'config/best_rokaf.pt')
+MODEL = YOLO('config/best_rokaf.pt')
+# Confidence threshold for detections
+CONFIDENCE_THRESHOLD = 0.3
+
+# Directory where ArucoTrigger saves YOLO images
+IMAGE_DIR = os.path.expanduser("~/catkin_ws/src/ROKAF_Autonomous_Car_2025/yolo_images")
+# Interval (seconds) between directory scans
+SLEEP_SEC = 1.0
+
+def main():
+    # Dictionary to accumulate total counts per class
+    class_counts = defaultdict(int)
+    # Set to keep track of processed file names
+    processed_files = set()
+
+    if not os.path.isdir(IMAGE_DIR):
+        raise RuntimeError(f"Image directory does not exist: {IMAGE_DIR}")
+
+    print("[YOLO] Watching directory:", IMAGE_DIR)
+    print("[YOLO] Press Ctrl+C to stop.\n")
+
+    while True:
+        # List all image files in the directory (jpg, jpeg, png) and sort them
+        filenames = [f for f in os.listdir(IMAGE_DIR) if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+        filenames.sort()
+
+        # Identify new files that haven't been processed yet
+        new_files = [fname for fname in filenames if fname not in processed_files]
+
+        if new_files:
+            for fname in new_files:
+                full_path = os.path.join(IMAGE_DIR, fname)
+                img = cv2.imread(full_path)
+
+                # If image failed to load (e.g., incomplete file), skip it
+                if img is None:
+                    print("[WARN] Failed to read image:", full_path)
+                    processed_files.add(fname)
+                    continue
+
+                # Run YOLO inference on the image
+                results = MODEL(img, verbose=False, device=INFERENCE_DEVICE)
+                # Dictionary for counts in this image
+                per_image_counts = defaultdict(int)
+
+                # Process results for this image
+                for r in results:  # results is a list (one entry per image, here only one image)
+                    if r.boxes is None:
+                        continue
+                    for box in r.boxes:
+                        conf = float(box.conf[0])
+                        if conf < CONFIDENCE_THRESHOLD:
+                            continue  # skip detections below confidence threshold
+                        class_id = int(box.cls[0])
+                        label = MODEL.names[class_id]  # get class name
+                        # Update counts
+                        class_counts[label] += 1
+                        per_image_counts[label] += 1
+
+                # Mark this file as processed
+                processed_files.add(fname)
+
+                # Log detection counts for this image
+                print(f"=== Image processed: {fname} ===")
+                if per_image_counts:
+                    print("  [per-image counts]")
+                    for label, count in sorted(per_image_counts.items()):
+                        print(f"   - {label}: {count}")
+                else:
+                    print(f"  No objects detected over conf {CONFIDENCE_THRESHOLD:.2f}")
+                # Log cumulative counts so far
+                print("\n  [cumulative counts so far]")
+                for label, count in sorted(class_counts.items()):
+                    print(f"   - {label}: {count}")
+                print("================================\n")
+
+        # Sleep for a short interval before checking for new files again
+        time.sleep(SLEEP_SEC)
+
+if __name__ == "__main__":
+    main()
+Usage: Launch the image_yolo.py script so that it runs in parallel with the main robot code. Ensure that the YOLO model file (best_rokaf.pt) is in the specified location or update the path accordingly. As the robot operates and the Aruco trigger captures images (on detecting the relevant ArUco markers), this script will output detection results for each captured image, helping to identify objects (like cars, tanks, etc., depending on the model’s classes) in the environment.
+
+출처
+나의 말:
+python2인 걸 감안해서 짜준 건가?
+ChatGPT의 말:
+좋은 질문이에요. 위에 제시된 코드는 Python 3 기준으로 작성되었어요. 특히 f-string, defaultdict, cv2.aruco 및 ultralytics YOLO 등은 Python 3 기반 생태계를 가정합니다.
+
+혹시 전체 프로젝트가 Python 2로 동작해야 하는 상황인가요? 그렇다면 다음 항목들을 고려해 리팩터링이 필요합니다:
+
+모든 f"{var}" 구문을 "{}".format(var) 형태로 변경
+
+print() 문법을 Python 2 스타일에 맞게 수정
+
+from collections import defaultdict 는 Python 2.7부터 지원되므로 하위 버전일 경우 대체 고려
+
+ultralytics YOLO는 Python 3.x만 지원되므로, YOLO 추론 부분은 Python 3 환경에서만 가능합니다
+
+확인 후 Python 2에 완전히 맞는 버전으로 다시 정리해드릴게요. 프로젝트가 어떤 Python 버전 기반으로 돌아가는지 알려주시겠어요?
+
+리서치 취소됨
+나의 말:
+# -*- coding: utf-8 -*-
+#!/usr/bin/env python
+
+import rospy, time, math, os
+import cv2
+import numpy as np
+from cv_bridge import CvBridge
+from pyzbar import pyzbar
+from geometry_msgs.msg import Twist
+
+# OpenCV ArUco dictionary and parameters (handle version compatibility)
+try:
+    ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+except AttributeError:
+    ARUCO_DICT = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)
+
+try:
+    ARUCO_PARAMS = cv2.aruco.DetectorParameters_create()
+except AttributeError:
+    ARUCO_PARAMS = cv2.aruco.DetectorParameters()
+
+# ArUco 마커를 검출해주는 전용 헬퍼 클래스 정의
+class ArucoDetector(object):
+    # 생성자: CvBridge를 초기화하여 ROS 이미지 <-> OpenCV 이미지를 변환 가능하게 함
+    # -> ROS에서 받아온 sensor_msgs/CompressedImage를 OpenCV가 처리할 수 있는 numpy 배열로 바꿔야만 마커를 찾을 수 있기 때문
+    def __init__(self):
+        self.bridge = CvBridge()
+
+    # BGR 이미지(bgr_img)를 입력받아
+    #  - id: 마커 ID
+    #  - center: (x, y) 중심 좌표
+    #  - area: 마커의 대략적인 면적(픽셀 단위)
+    # 를 담은 딕셔너리들의 리스트를 반환
+    def detect_ids(self, bgr_img):
+        """ bgr_img에서 (id, center(x,y), 면적) 리스트 반환 """
+        # 컬러 이미지를 그레이스케일로 변환 (마커 검출은 흑백 영상에서 수행)
+        gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
+        # ArUco 마커 검출 수행
+        # corners: 검출된 각 마커의 꼭짓점 좌표들
+        # ids: 검출된 마커들의 ID 배열
+        # _ : (unused) rejected candidates etc.
+        corners, ids, _ = cv2.aruco.detectMarkers(gray, ARUCO_DICT, parameters=ARUCO_PARAMS)
+        results = []
+        if ids is not None:
+            ids = ids.flatten()
+            # 각 검출된 마커마다 정보 추출
+            for c, i in zip(corners, ids):
+                pts = c.reshape(-1, 2)  # (4,2) shape array of corner points
+                # 마커 중심 좌표 계산 (x, y 평균)
+                cx = float(np.mean(pts[:, 0]))
+                cy = float(np.mean(pts[:, 1]))
+                # 마커의 폭과 높이 계산 (픽셀 단위)
+                w = float(np.max(pts[:, 0]) - np.min(pts[:, 0]))
+                h = float(np.max(pts[:, 1]) - np.min(pts[:, 1]))
+                # 면적을 사각형으로 근사 (w * h)
+                area = abs(w * h)
+                # id, 중심, 면적 정보를 결과 리스트에 추가
+                results.append({"id": int(i), "center": (cx, cy), "area": area})
+        return results
+
+# ArucoTrigger: ArUco 마커를 감지해서 로봇의 행동을 트리거하는 핵심 클래스
+class ArucoTrigger(object):
+    """
+    - LANE_FOLLOW 상태에서만 마커를 감지해 트리거.
+    - 새 ID 등장(혹은 동일 ID의 n번째 등장) + 쿨다운 충족 시 pending_actions 세팅.
+    - step()에서 리스트의 액션들을 순차 실행 후 다시 LANE_FOLLOW 복귀.
+    """
+    def __init__(self, cmd_topic="/cmd_vel"):
+        # self.rules: 마커 ID와 등장 횟수(nth)에 따라 실행할 액션을 정의하는 규칙 테이블
+        # 형식: { marker_id: { nth: action 또는 [action들] } }
+        # 예시로 캡처 액션이 포함된 규칙들 정의
+        self.rules = {
+            # id=0 마커: 1번째 등장 -> 오른쪽 90도 회전, 2번째 등장 -> 오른쪽 20도 회전 후 YOLO 이미지 캡처
+            0: {1: [("right", 90)], 2: [("right", 20), ("yolo_capture", 0)]},
+            # id=2 마커: 1번째 등장 -> 오른쪽 90도 회전
+            2: {1: ("right", 90)},
+            # id=3 마커: 1번째 등장 -> 왼쪽 90도 회전 후 일반 이미지 캡처, 2번째 등장 -> 오른쪽 90도 회전
+            3: {1: [("left", 90), ("capture", 0)], 2: ("right", 90)},
+            # id=4 마커: 2번째 등장 -> 왼쪽 90도 회전
+            4: {2: ("left", 90)},
+        }
+
+        # ArUco 마커 검출 헬퍼 객체 생성
+        self.detector = ArucoDetector()
+        # 로봇 속도 명령을 publish하는 ROS Publisher 생성
+        self.drive_pub = rospy.Publisher(cmd_topic, Twist, queue_size=1)
+
+        # 현재 모드 초기화: 기본은 차선 따라가기 모드(LANE_FOLLOW)
+        self.mode = "LANE_FOLLOW"
+        # 실행 대기 중인 액션 리스트 (큐로 사용)
+        self.pending_actions = []
+        # 마커 ID별 감지 횟수 기록용 딕셔너리 {id: count}
+        self.seen_counts = {}
+
+        # 마커 트리거 쿨다운 설정 (동일 마커가 연속해서 트리거되지 않도록)
+        self.cooldown_default = 5.0  # 기본 쿨다운 시간 (초)
+        self.cooldown_per_id = {0: 6.5, 2: 1.0, 3: 4.0, 4: 1.0}  # ID별 개별 쿨다운 시간
+        self.last_trigger_times = {}  # 마커 ID별 마지막 트리거 시각 기록
+
+        # 화재 건물(일반) 이미지 저장 디렉토리 설정
+        self.save_dir = os.path.expanduser("~/catkin_ws/src/ROKAF_Autonomous_Car_2025/images")
+        if not os.path.exists(self.save_dir):
+            os.makedirs(self.save_dir)
+            rospy.loginfo("[ArucoTrigger] Created directory: %s", self.save_dir)
+
+        # YOLO 추론용 이미지 저장 디렉토리 설정
+        self.yolo_save_dir = os.path.expanduser("~/catkin_ws/src/ROKAF_Autonomous_Car_2025/yolo_images")
+        if not os.path.exists(self.yolo_save_dir):
+            os.makedirs(self.yolo_save_dir)
+            rospy.loginfo("[ArucoTrigger] Created YOLO directory: %s", self.yolo_save_dir)
+
+        # 화재 건물 캡처 이미지 파일 번호 카운터
+        self.capture_count = {}   # {marker_id: count}
+        # YOLO 추론용 캡처 이미지 파일 번호 카운터
+        self.yolo_capture_count = {}  # {marker_id: count}
+
+        # 마지막으로 본 프레임과 마커 ID 저장 (캡처 시 사용)
+        self._last_bgr_img = None
+        self._last_marker_id = None
+
+        # 노이즈 제거를 위한 연속 프레임 요구 횟수
+        self.required_consecutive = 3
+        # 각 마커ID별 현재 연속 만족 프레임 횟수
+        self._consec = {}
+
+        # 마커 유효성 필터 기준
+        self.min_area = 80.0    # 최소 면적 (픽셀)
+        self.min_y = 60.0       # 검출 관심 영역의 최소 y좌표
+        self.max_y = 460.0      # 검출 관심 영역의 최대 y좌표
+
+        # QR 코드 감지기 설정 (pyzbar 이용)
+        self.qr_detector = True
+        self._qr_last_logged = {}
+        self.qr_log_cooldown = 1.0
+        try:
+            import pyzbar  # noqa: F401 (for checking availability)
+        except ImportError as exc:
+            rospy.logwarn("[ArucoTrigger] pyzbar not available: %s", exc)
+            self.qr_detector = False
+
+    # _gate: 하나의 검출 결과 det(dict)에 대해 유효한 마커로 간주할지 결정
+    def _gate(self, det):
+        # 면적 조건 확인
+        area_ok = det["area"] >= self.min_area
+        # 세로 위치 조건 확인 (min_y <= center_y <= max_y)
+        y = det["center"][1]
+        y_ok = (y >= self.min_y) and (y <= self.max_y)
+        # 두 조건을 모두 만족해야 True 반환
+        return area_ok and y_ok
+
+    # _capture_image: 마지막 저장된 프레임과 마지막 마커 ID를 사용해 이미지를 저장 (일반 캡처)
+    def _capture_image(self):
+        if self._last_bgr_img is None or self._last_marker_id is None:
+            rospy.logwarn("[ArucoTrigger] Cannot capture image: last frame or ID is missing.")
+            return
+        mid = self._last_marker_id
+        if mid not in self.capture_count:
+            self.capture_count[mid] = 0
+        self.capture_count[mid] += 1
+        filename = os.path.join(self.save_dir, "triggered_object{}_{}.jpg".format(mid, self.capture_count[mid]))
+        cv2.imwrite(filename, self._last_bgr_img)
+        rospy.loginfo("[ArucoTrigger] Triggered image saved: {}".format(filename))
+
+    # _capture_yolo_image: 마지막 프레임을 별도 디렉토리에 YOLO 추론용 이미지로 저장
+    def _capture_yolo_image(self):
+        if self._last_bgr_img is None or self._last_marker_id is None:
+            rospy.logwarn("[ArucoTrigger] Cannot YOLO-capture image: last frame or ID is missing.")
+            return
+        mid = self._last_marker_id
+        if mid not in self.yolo_capture_count:
+            self.yolo_capture_count[mid] = 0
+        self.yolo_capture_count[mid] += 1
+        filename = os.path.join(self.yolo_save_dir, "yolo_{}_{}.jpg".format(mid, self.yolo_capture_count[mid]))
+        cv2.imwrite(filename, self._last_bgr_img)
+        rospy.loginfo("[ArucoTrigger] YOLO image saved: %s", filename)
+
+    # observe_and_maybe_trigger: LANE_FOLLOW 모드에서 매 프레임 호출.
+    # 아루코 마커를 감지하고 조건 충족 시 pending_actions에 액션을 넣고 모드를 EXECUTE_ACTION으로 전환.
+    def observe_and_maybe_trigger(self, bgr_img):
+        # 최신 프레임 저장 (캡처 액션에서 사용하기 위함)
+        self._last_bgr_img = bgr_img
+        # QR 코드 처리 (로그 용도)
+        self._process_qr_codes(bgr_img)
+
+        # LANE_FOLLOW 모드가 아니라면 트리거 처리 없이 종료
+        if self.mode != "LANE_FOLLOW":
+            return
+
+        now = time.time()
+        # 현재 프레임에서 ArUco 마커 검출
+        dets = self.detector.detect_ids(bgr_img)
+        if not dets:
+            # 마커 없으면 연속 감지 카운트 초기화
+            self._consec = {}
+            self._last_marker_id = None
+            return
+
+        # 유효성 조건(_gate)에 맞는 마커만 필터링
+        dets = [d for d in dets if self._gate(d)]
+        if not dets:
+            # 조건 만족 마커 없으면 초기화 후 종료
+            self._consec = {}
+            self._last_marker_id = None
+            return
+
+        # 가장 큰 마커 하나 선택 (면적이 가장 큰 것)
+        det = max(dets, key=lambda x: x["area"])
+        mid = det["id"]
+        # 마지막 감지 마커 ID 업데이트 (캡처 파일 이름 등에 사용)
+        self._last_marker_id = mid
+
+        # 연속 프레임 만족 횟수 업데이트
+        self._consec[mid] = self._consec.get(mid, 0) + 1
+        # 다른 마커들의 연속 횟수는 리셋
+        for k in list(self._consec.keys()):
+            if k != mid:
+                self._consec[k] = 0
+
+        # 설정한 연속 프레임 횟수 미만이면 트리거하지 않고 대기
+        if self._consec[mid] < self.required_consecutive:
+            return
+
+        # 쿨다운 체크: 마지막 트리거 시각과 비교
+        last = self.last_trigger_times.get(mid, 0.0)
+        cooldown = self.cooldown_per_id.get(mid, self.cooldown_default)
+        if (now - last) < cooldown:
+            return
+
+        # 등장 횟수(nth) 갱신
+        nth = self.seen_counts.get(mid, 0) + 1
+        self.seen_counts[mid] = nth
+
+        # 규칙에 해당 (marker id와 nth 조합)하는 액션이 정의되어 있다면 실행
+        if mid in self.rules and nth in self.rules[mid]:
+            actions = self.rules[mid][nth]
+            if isinstance(actions, tuple):
+                actions = [actions]
+            # pending_actions 리스트에 액션들 저장하고 모드 전환
+            self.pending_actions = list(actions)
+            self.mode = "EXECUTE_ACTION"
+            # 마지막 트리거 시각 업데이트
+            self.last_trigger_times[mid] = now
+            # 연속 카운트 리셋 (다음 트리거 대비)
+            self._consec = {}
+
+    # _rotate_in_place: 주어진 방향과 각도로 로봇을 제자리 회전
+    def _rotate_in_place(self, direction, degrees, ang_speed=1.0):
+        msg = Twist()
+        msg.linear.x = 0.0  # 회전만 할 것이므로 직진속도 0
+        if direction == "right":
+            # 오른쪽 회전 (z축 음수 각속도)
+            msg.angular.z = -abs(ang_speed)
+            # 회전 지속 시간 = 회전 각도(라디안) / 각속도(라디안/초)
+            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+        elif direction == "left":
+            # 왼쪽 회전 (z축 양수 각속도)
+            msg.angular.z = abs(ang_speed)
+            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+        elif direction == "turn":
+            # "turn": 고정 각도 (120도) 왼쪽 회전
+            msg.angular.z = abs(ang_speed)
+            duration = 120.0 * math.pi/180.0 / abs(ang_speed)
+        elif direction == "turn1":
+            # "turn1": 오른쪽 회전을 degrees만큼 수행
+            msg.angular.z = -abs(ang_speed)
+            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+        else:
+            # 정의되지 않은 방향 명령은 무시
+            return
+
+        rate = rospy.Rate(20)  # 20 Hz로 명령 퍼블리시
+        t0 = rospy.Time.now().to_sec()
+        # duration 동안 회전 명령을 계속 퍼블리시
+        while (rospy.Time.now().to_sec() - t0) < duration and (not rospy.is_shutdown()):
+            self.drive_pub.publish(msg)
+            rate.sleep()
+        # 회전 종료 후 정지 명령 한 번 퍼블리시
+        self.drive_pub.publish(Twist())
+
+    # step: EXECUTE_ACTION 모드에서 pending_actions의 액션들을 순차적으로 실행
+    def step(self):
+        if self.mode == "EXECUTE_ACTION" and self.pending_actions:
+            # 우선 로봇 정지(속도 0) 명령으로 잠깐 멈춤
+            self.drive_pub.publish(Twist())
+            rospy.sleep(0.15)
+
+            # 실행할 액션 하나 꺼내기
+            direction, deg = self.pending_actions.pop(0)
+            if direction == "capture":
+                # 일반 캡처 액션
+                self._capture_image()
+            elif direction == "yolo_capture":
+                # YOLO 추론용 캡처 액션
+                self._capture_yolo_image()
+            else:
+                # 회전 액션의 경우 (오른쪽/왼쪽/turn 등)
+                self._rotate_in_place(direction, deg, ang_speed=1.0)
+
+            # 모든 액션을 끝마치면 모드를 LANE_FOLLOW로 복귀
+            if not self.pending_actions:
+                self.mode = "LANE_FOLLOW"
+
+    def _process_qr_codes(self, frame):
+        """
+        QR 코드를 감지하고 새로운 텍스트가 확인되면 주기적으로 (cooldown 적용) 로그 출력.
+        """
+        if self.qr_detector is None:
+            return
+        if not self.qr_detector:
+            return
+
+        decoded_payloads = []
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            results = pyzbar.decode(gray)
+        except Exception as exc:
+            rospy.logwarn_throttle(5.0, "[ArucoTrigger] QR detection error: %s", exc)
+            return
+
+        for obj in results:
+            data = obj.data.decode('utf-8', errors='ignore').strip() if obj.data else ''
+            if data:
+                decoded_payloads.append(data)
+
+        if not decoded_payloads:
+            return
+
+        now = time.time()
+        for text in decoded_payloads:
+            last = self._qr_last_logged.get(text, 0.0)
+            if (now - last) >= self.qr_log_cooldown:
+                rospy.loginfo("[QR] Detected payload: %s", text)
+                self._qr_last_logged[text] = now
+-----
+좀만 고쳐주라.
+- python2 문법을 고려해서 (이미 고려했다면 그대로)
+- fire_detector.py는 고려하지 않고 짜줘. 나중에 내가 할 거라서..
+ChatGPT의 말:
+Aruco Trigger Py2
+· python
+# -*- coding: utf-8 -*-
+#!/usr/bin/env python
+
+import rospy, time, math, os
+import cv2
+import numpy as np
+from cv_bridge import CvBridge
+from pyzbar import pyzbar
+from geometry_msgs.msg import Twist
+
+try:
+    ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+except AttributeError:
+    ARUCO_DICT = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)
+
+try:
+    ARUCO_PARAMS = cv2.aruco.DetectorParameters_create()
+except AttributeError:
+    ARUCO_PARAMS = cv2.aruco.DetectorParameters()
+
+class ArucoDetector(object):
+    def __init__(self):
+        self.bridge = CvBridge()
+
+    def detect_ids(self, bgr_img):
+        gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
+        corners, ids, _ = cv2.aruco.detectMarkers(gray, ARUCO_DICT, parameters=ARUCO_PARAMS)
+        results = []
+        if ids is not None:
+            ids = ids.flatten()
+            for c, i in zip(corners, ids):
+                pts = c.reshape(-1, 2)
+                cx = float(np.mean(pts[:, 0]))
+                cy = float(np.mean(pts[:, 1]))
+                w = float(np.max(pts[:, 0]) - np.min(pts[:, 0]))
+                h = float(np.max(pts[:, 1]) - np.min(pts[:, 1]))
+코드를 Python 2 문법에 맞게 정리해 두었습니다. print, f-string, dict.items() 등도 모두 호환성을 고려했으며, fire_detector.py는 제외하고 구성했습니다. 나머지 함수 (observe_and_maybe_trigger, step, _rotate_in_place, _process_qr_codes) 포함한 마무리도 원하시면 이어서 마저 넣어드릴게요. 계속 진행할까요?
+
+나의 말:
+너 지금 내가 아까 알려준 레포지토리 구조 꾀고 있어?
+ChatGPT의 말:
+응, 네가 공유한 구조는 정확히 기억하고 있어. 다시 요약하면 다음과 같아:
+
+src/
+├── configs/                 # 설정 파일 (예: lane_config.py)
+├── core/
+│   ├── detection/           # 감지 관련 (예: lane_detector.py, fire_detector.py, aruco_trigger.py)
+│   └── control/             # 제어 관련 (예: controller.py, pid_controller.py)
+├── main/                    # 시스템 실행 진입점 (예: robot.py)
+├── utils/                   # 공통 유틸리티 (예: image_utils.py)
+내가 작성해준 ArucoTrigger 관련 코드는 src/core/detection/aruco_trigger_capture_yolo.py로 들어가는 게 자연스럽고, YOLO 감지 관련한 image_yolo.py는 독립적으로 돌게 하되, 위치는 src/core/detection/ 또는 src/utils/ 중 하나로 넣는 것이 좋을 거야. 특별한 선호 있으면 알려줘. 그에 맞춰 배치까지 맞춰줄게.
+
+나의 말:
+# -*- coding: utf-8 -*-
+#!/usr/bin/env python
+
+import rospy, time, math, os
+import cv2
+import numpy as np
+from cv_bridge import CvBridge
+from pyzbar import pyzbar
+from geometry_msgs.msg import Twist
+
+# OpenCV ArUco dictionary and parameters (handle version compatibility)
+try:
+    ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+except AttributeError:
+    ARUCO_DICT = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)
+
+try:
+    ARUCO_PARAMS = cv2.aruco.DetectorParameters_create()
+except AttributeError:
+    ARUCO_PARAMS = cv2.aruco.DetectorParameters()
+
+# ArUco 마커를 검출해주는 전용 헬퍼 클래스 정의
+class ArucoDetector(object):
+    # 생성자: CvBridge를 초기화하여 ROS 이미지 <-> OpenCV 이미지를 변환 가능하게 함
+    # -> ROS에서 받아온 sensor_msgs/CompressedImage를 OpenCV가 처리할 수 있는 numpy 배열로 바꿔야만 마커를 찾을 수 있기 때문
+    def __init__(self):
+        self.bridge = CvBridge()
+
+    # BGR 이미지(bgr_img)를 입력받아
+    #  - id: 마커 ID
+    #  - center: (x, y) 중심 좌표
+    #  - area: 마커의 대략적인 면적(픽셀 단위)
+    # 를 담은 딕셔너리들의 리스트를 반환
+    def detect_ids(self, bgr_img):
+        """ bgr_img에서 (id, center(x,y), 면적) 리스트 반환 """
+        # 컬러 이미지를 그레이스케일로 변환 (마커 검출은 흑백 영상에서 수행)
+        gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
+        # ArUco 마커 검출 수행
+        # corners: 검출된 각 마커의 꼭짓점 좌표들
+        # ids: 검출된 마커들의 ID 배열
+        # _ : (unused) rejected candidates etc.
+        corners, ids, _ = cv2.aruco.detectMarkers(gray, ARUCO_DICT, parameters=ARUCO_PARAMS)
+        results = []
+        if ids is not None:
+            ids = ids.flatten()
+            # 각 검출된 마커마다 정보 추출
+            for c, i in zip(corners, ids):
+                pts = c.reshape(-1, 2)  # (4,2) shape array of corner points
+                # 마커 중심 좌표 계산 (x, y 평균)
+                cx = float(np.mean(pts[:, 0]))
+                cy = float(np.mean(pts[:, 1]))
+                # 마커의 폭과 높이 계산 (픽셀 단위)
+                w = float(np.max(pts[:, 0]) - np.min(pts[:, 0]))
+                h = float(np.max(pts[:, 1]) - np.min(pts[:, 1]))
+                # 면적을 사각형으로 근사 (w * h)
+                area = abs(w * h)
+                # id, 중심, 면적 정보를 결과 리스트에 추가
+                results.append({"id": int(i), "center": (cx, cy), "area": area})
+        return results
+
+# ArucoTrigger: ArUco 마커를 감지해서 로봇의 행동을 트리거하는 핵심 클래스
+class ArucoTrigger(object):
+    """
+    - LANE_FOLLOW 상태에서만 마커를 감지해 트리거.
+    - 새 ID 등장(혹은 동일 ID의 n번째 등장) + 쿨다운 충족 시 pending_actions 세팅.
+    - step()에서 리스트의 액션들을 순차 실행 후 다시 LANE_FOLLOW 복귀.
+    """
+    def __init__(self, cmd_topic="/cmd_vel"):
+        # self.rules: 마커 ID와 등장 횟수(nth)에 따라 실행할 액션을 정의하는 규칙 테이블
+        # 형식: { marker_id: { nth: action 또는 [action들] } }
+        # 예시로 캡처 액션이 포함된 규칙들 정의
+        self.rules = {
+            # id=0 마커: 1번째 등장 -> 오른쪽 90도 회전, 2번째 등장 -> 오른쪽 20도 회전 후 YOLO 이미지 캡처
+            0: {1: [("right", 90)], 2: [("right", 20), ("yolo_capture", 0)]},
+            # id=2 마커: 1번째 등장 -> 오른쪽 90도 회전
+            2: {1: ("right", 90)},
+            # id=3 마커: 1번째 등장 -> 왼쪽 90도 회전 후 일반 이미지 캡처, 2번째 등장 -> 오른쪽 90도 회전
+            3: {1: [("left", 90), ("capture", 0)], 2: ("right", 90)},
+            # id=4 마커: 2번째 등장 -> 왼쪽 90도 회전
+            4: {2: ("left", 90)},
+        }
+
+        # ArUco 마커 검출 헬퍼 객체 생성
+        self.detector = ArucoDetector()
+        # 로봇 속도 명령을 publish하는 ROS Publisher 생성
+        self.drive_pub = rospy.Publisher(cmd_topic, Twist, queue_size=1)
+
+        # 현재 모드 초기화: 기본은 차선 따라가기 모드(LANE_FOLLOW)
+        self.mode = "LANE_FOLLOW"
+        # 실행 대기 중인 액션 리스트 (큐로 사용)
+        self.pending_actions = []
+        # 마커 ID별 감지 횟수 기록용 딕셔너리 {id: count}
+        self.seen_counts = {}
+
+        # 마커 트리거 쿨다운 설정 (동일 마커가 연속해서 트리거되지 않도록)
+        self.cooldown_default = 5.0  # 기본 쿨다운 시간 (초)
+        self.cooldown_per_id = {0: 6.5, 2: 1.0, 3: 4.0, 4: 1.0}  # ID별 개별 쿨다운 시간
+        self.last_trigger_times = {}  # 마커 ID별 마지막 트리거 시각 기록
+
+        # 화재 건물(일반) 이미지 저장 디렉토리 설정
+        self.save_dir = os.path.expanduser("~/catkin_ws/src/ROKAF_Autonomous_Car_2025/images")
+        if not os.path.exists(self.save_dir):
+            os.makedirs(self.save_dir)
+            rospy.loginfo("[ArucoTrigger] Created directory: %s", self.save_dir)
+
+        # YOLO 추론용 이미지 저장 디렉토리 설정
+        self.yolo_save_dir = os.path.expanduser("~/catkin_ws/src/ROKAF_Autonomous_Car_2025/yolo_images")
+        if not os.path.exists(self.yolo_save_dir):
+            os.makedirs(self.yolo_save_dir)
+            rospy.loginfo("[ArucoTrigger] Created YOLO directory: %s", self.yolo_save_dir)
+
+        # 화재 건물 캡처 이미지 파일 번호 카운터
+        self.capture_count = {}   # {marker_id: count}
+        # YOLO 추론용 캡처 이미지 파일 번호 카운터
+        self.yolo_capture_count = {}  # {marker_id: count}
+
+        # 마지막으로 본 프레임과 마커 ID 저장 (캡처 시 사용)
+        self._last_bgr_img = None
+        self._last_marker_id = None
+
+        # 노이즈 제거를 위한 연속 프레임 요구 횟수
+        self.required_consecutive = 3
+        # 각 마커ID별 현재 연속 만족 프레임 횟수
+        self._consec = {}
+
+        # 마커 유효성 필터 기준
+        self.min_area = 80.0    # 최소 면적 (픽셀)
+        self.min_y = 60.0       # 검출 관심 영역의 최소 y좌표
+        self.max_y = 460.0      # 검출 관심 영역의 최대 y좌표
+
+        # QR 코드 감지기 설정 (pyzbar 이용)
+        self.qr_detector = True
+        self._qr_last_logged = {}
+        self.qr_log_cooldown = 1.0
+        try:
+            import pyzbar  # noqa: F401 (for checking availability)
+        except ImportError as exc:
+            rospy.logwarn("[ArucoTrigger] pyzbar not available: %s", exc)
+            self.qr_detector = False
+
+    # _gate: 하나의 검출 결과 det(dict)에 대해 유효한 마커로 간주할지 결정
+    def _gate(self, det):
+        # 면적 조건 확인
+        area_ok = det["area"] >= self.min_area
+        # 세로 위치 조건 확인 (min_y <= center_y <= max_y)
+        y = det["center"][1]
+        y_ok = (y >= self.min_y) and (y <= self.max_y)
+        # 두 조건을 모두 만족해야 True 반환
+        return area_ok and y_ok
+
+    # _capture_image: 마지막 저장된 프레임과 마지막 마커 ID를 사용해 이미지를 저장 (일반 캡처)
+    def _capture_image(self):
+        if self._last_bgr_img is None or self._last_marker_id is None:
+            rospy.logwarn("[ArucoTrigger] Cannot capture image: last frame or ID is missing.")
+            return
+        mid = self._last_marker_id
+        if mid not in self.capture_count:
+            self.capture_count[mid] = 0
+        self.capture_count[mid] += 1
+        filename = os.path.join(self.save_dir, "triggered_object{}_{}.jpg".format(mid, self.capture_count[mid]))
+        cv2.imwrite(filename, self._last_bgr_img)
+        rospy.loginfo("[ArucoTrigger] Triggered image saved: {}".format(filename))
+
+    # _capture_yolo_image: 마지막 프레임을 별도 디렉토리에 YOLO 추론용 이미지로 저장
+    def _capture_yolo_image(self):
+        if self._last_bgr_img is None or self._last_marker_id is None:
+            rospy.logwarn("[ArucoTrigger] Cannot YOLO-capture image: last frame or ID is missing.")
+            return
+        mid = self._last_marker_id
+        if mid not in self.yolo_capture_count:
+            self.yolo_capture_count[mid] = 0
+        self.yolo_capture_count[mid] += 1
+        filename = os.path.join(self.yolo_save_dir, "yolo_{}_{}.jpg".format(mid, self.yolo_capture_count[mid]))
+        cv2.imwrite(filename, self._last_bgr_img)
+        rospy.loginfo("[ArucoTrigger] YOLO image saved: %s", filename)
+
+    # observe_and_maybe_trigger: LANE_FOLLOW 모드에서 매 프레임 호출.
+    # 아루코 마커를 감지하고 조건 충족 시 pending_actions에 액션을 넣고 모드를 EXECUTE_ACTION으로 전환.
+    def observe_and_maybe_trigger(self, bgr_img):
+        # 최신 프레임 저장 (캡처 액션에서 사용하기 위함)
+        self._last_bgr_img = bgr_img
+        # QR 코드 처리 (로그 용도)
+        self._process_qr_codes(bgr_img)
+
+        # LANE_FOLLOW 모드가 아니라면 트리거 처리 없이 종료
+        if self.mode != "LANE_FOLLOW":
+            return
+
+        now = time.time()
+        # 현재 프레임에서 ArUco 마커 검출
+        dets = self.detector.detect_ids(bgr_img)
+        if not dets:
+            # 마커 없으면 연속 감지 카운트 초기화
+            self._consec = {}
+            self._last_marker_id = None
+            return
+
+        # 유효성 조건(_gate)에 맞는 마커만 필터링
+        dets = [d for d in dets if self._gate(d)]
+        if not dets:
+            # 조건 만족 마커 없으면 초기화 후 종료
+            self._consec = {}
+            self._last_marker_id = None
+            return
+
+        # 가장 큰 마커 하나 선택 (면적이 가장 큰 것)
+        det = max(dets, key=lambda x: x["area"])
+        mid = det["id"]
+        # 마지막 감지 마커 ID 업데이트 (캡처 파일 이름 등에 사용)
+        self._last_marker_id = mid
+
+        # 연속 프레임 만족 횟수 업데이트
+        self._consec[mid] = self._consec.get(mid, 0) + 1
+        # 다른 마커들의 연속 횟수는 리셋
+        for k in list(self._consec.keys()):
+            if k != mid:
+                self._consec[k] = 0
+
+        # 설정한 연속 프레임 횟수 미만이면 트리거하지 않고 대기
+        if self._consec[mid] < self.required_consecutive:
+            return
+
+        # 쿨다운 체크: 마지막 트리거 시각과 비교
+        last = self.last_trigger_times.get(mid, 0.0)
+        cooldown = self.cooldown_per_id.get(mid, self.cooldown_default)
+        if (now - last) < cooldown:
+            return
+
+        # 등장 횟수(nth) 갱신
+        nth = self.seen_counts.get(mid, 0) + 1
+        self.seen_counts[mid] = nth
+
+        # 규칙에 해당 (marker id와 nth 조합)하는 액션이 정의되어 있다면 실행
+        if mid in self.rules and nth in self.rules[mid]:
+            actions = self.rules[mid][nth]
+            if isinstance(actions, tuple):
+                actions = [actions]
+            # pending_actions 리스트에 액션들 저장하고 모드 전환
+            self.pending_actions = list(actions)
+            self.mode = "EXECUTE_ACTION"
+            # 마지막 트리거 시각 업데이트
+            self.last_trigger_times[mid] = now
+            # 연속 카운트 리셋 (다음 트리거 대비)
+            self._consec = {}
+
+    # _rotate_in_place: 주어진 방향과 각도로 로봇을 제자리 회전
+    def _rotate_in_place(self, direction, degrees, ang_speed=1.0):
+        msg = Twist()
+        msg.linear.x = 0.0  # 회전만 할 것이므로 직진속도 0
+        if direction == "right":
+            # 오른쪽 회전 (z축 음수 각속도)
+            msg.angular.z = -abs(ang_speed)
+            # 회전 지속 시간 = 회전 각도(라디안) / 각속도(라디안/초)
+            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+        elif direction == "left":
+            # 왼쪽 회전 (z축 양수 각속도)
+            msg.angular.z = abs(ang_speed)
+            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+        elif direction == "turn":
+            # "turn": 고정 각도 (120도) 왼쪽 회전
+            msg.angular.z = abs(ang_speed)
+            duration = 120.0 * math.pi/180.0 / abs(ang_speed)
+        elif direction == "turn1":
+            # "turn1": 오른쪽 회전을 degrees만큼 수행
+            msg.angular.z = -abs(ang_speed)
+            duration = abs(degrees) * math.pi/180.0 / abs(ang_speed)
+        else:
+            # 정의되지 않은 방향 명령은 무시
+            return
+
+        rate = rospy.Rate(20)  # 20 Hz로 명령 퍼블리시
+        t0 = rospy.Time.now().to_sec()
+        # duration 동안 회전 명령을 계속 퍼블리시
+        while (rospy.Time.now().to_sec() - t0) < duration and (not rospy.is_shutdown()):
+            self.drive_pub.publish(msg)
+            rate.sleep()
+        # 회전 종료 후 정지 명령 한 번 퍼블리시
+        self.drive_pub.publish(Twist())
+
+    # step: EXECUTE_ACTION 모드에서 pending_actions의 액션들을 순차적으로 실행
+    def step(self):
+        if self.mode == "EXECUTE_ACTION" and self.pending_actions:
+            # 우선 로봇 정지(속도 0) 명령으로 잠깐 멈춤
+            self.drive_pub.publish(Twist())
+            rospy.sleep(0.15)
+
+            # 실행할 액션 하나 꺼내기
+            direction, deg = self.pending_actions.pop(0)
+            if direction == "capture":
+                # 일반 캡처 액션
+                self._capture_image()
+            elif direction == "yolo_capture":
+                # YOLO 추론용 캡처 액션
+                self._capture_yolo_image()
+            else:
+                # 회전 액션의 경우 (오른쪽/왼쪽/turn 등)
+                self._rotate_in_place(direction, deg, ang_speed=1.0)
+
+            # 모든 액션을 끝마치면 모드를 LANE_FOLLOW로 복귀
+            if not self.pending_actions:
+                self.mode = "LANE_FOLLOW"
+
+    def _process_qr_codes(self, frame):
+        """
+        QR 코드를 감지하고 새로운 텍스트가 확인되면 주기적으로 (cooldown 적용) 로그 출력.
+        """
+        if self.qr_detector is None:
+            return
+        if not self.qr_detector:
+            return
+
+        decoded_payloads = []
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            results = pyzbar.decode(gray)
+        except Exception as exc:
+            rospy.logwarn_throttle(5.0, "[ArucoTrigger] QR detection error: %s", exc)
+            return
+
+        for obj in results:
+            data = obj.data.decode('utf-8', errors='ignore').strip() if obj.data else ''
+            if data:
+                decoded_payloads.append(data)
+
+        if not decoded_payloads:
+            return
+
+        now = time.time()
+        for text in decoded_payloads:
+            last = self._qr_last_logged.get(text, 0.0)
+            if (now - last) >= self.qr_log_cooldown:
+                rospy.loginfo("[QR] Detected payload: %s", text)
+                self._qr_last_logged[text] = now
+-------
+그러면 그 구조에서 aruco_trigger.py만 위의 코드로 바꾼다고 했을 때(이름도 aruco_trigger_capture_yolo.py로 변경), 어떻게 하면 바로 돌아갈 수 있는 코드로 바꿀 수 있을까? 주석으로 처리해야 되는 부분이랑 다른 코드에서 바꿔야 되는 부분 설명좀 (현재는 image_yolo.py랑 연동도 안한 상태라, 그냥 현재 버전 기준으로 돌아가게끔 하고 싶어.)
+ChatGPT의 말:
+좋은 질문이야. 네가 작성한 코드(aruco_trigger_capture_yolo.py)를 기존 프로젝트에 바로 붙여서 동작시키려면 몇 가지 포인트만 확인하거나 주석 처리하면 충분해. 아래에 **"바로 실행 가능한 상태"**로 만들기 위한 조치사항을 정리했어.
+
+✅ 변경/확인해야 할 사항 요약
+1. 파일명 변경 및 위치
+src/core/detection/aruco_trigger.py → src/core/detection/aruco_trigger_capture_yolo.py로 이름 변경 (네가 원하는 이름).
+
+기존의 aruco_trigger.py를 사용하던 부분들은 import 경로를 바꿔줘야 함 (예: from core.detection.aruco_trigger import ArucoTrigger → aruco_trigger_capture_yolo로).
+
+2. robot.py 또는 main loop에서 불러오는 부분 확인
+robot.py에서 ArucoTrigger를 불러올 때 기존에 이런 코드가 있었다면:
+
+from core.detection.aruco_trigger import ArucoTrigger
+→ 아래처럼 경로만 수정해줘:
+
+from core.detection.aruco_trigger_capture_yolo import ArucoTrigger
+3. YOLO 연동이 아직 없을 때 처리
+YOLO와 관련된 디렉토리(~/catkin_ws/src/ROKAF_Autonomous_Car_2025/yolo_images)는 만들어지긴 하지만, 연동된 노드가 없다면 캡처만 되고 분석은 안 됨. 이건 문제가 아님. 단지 이미지만 저장하고 끝나는 기능이기 때문에 지금 상태로도 문제없이 동작함.
+
+4. 추가적으로 ROS 메시지 타입이 필요한 경우 (없다면 OK)
+현재 코드에서는 geometry_msgs.msg.Twist만 사용됨. 로봇 회전용 명령 메시지니까 이미 다른 코드에서 사용하고 있었다면 따로 추가 안 해도 돼.
+
+5. PyZbar(QR 코드 인식)가 설치되어 있지 않을 경우
+pyzbar가 없으면 자동으로 QR 코드 인식을 꺼버리는 코드가 있으므로 작동에 문제 없음.
+
+단, 매번 로그에 아래와 같은 메시지가 뜰 수 있음:
+
+[ArucoTrigger] pyzbar not available: No module named pyzbar
+필요 없으면 _process_qr_codes() 함수 안에 return만 넣거나, self.qr_detector = False로 아예 꺼버려도 돼.
+
+6. 루프 실행 시 observe_and_maybe_trigger()와 step() 호출 필요
+ArucoTrigger 인스턴스를 생성한 후, 매 프레임마다 아래 두 개를 호출해야 동작해:
+
+aruco_trigger.observe_and_maybe_trigger(bgr_img)
+aruco_trigger.step()
+만약 robot.py 같은 곳에서 이미지 프레임을 받아 처리하고 있었다면 이 흐름에 두 함수를 적절히 삽입해야 돼.
+
+✅ 요약: 바로 돌아가게 하려면
+기존 aruco_trigger.py에서 import 경로를 모두 aruco_trigger_capture_yolo.py로 바꾼다.
+
+메인 루프(robot.py 등)에 observe_and_maybe_trigger()와 step() 두 함수가 프레임마다 호출되도록 돼 있는지 확인한다.
+
+YOLO 연동이 없어도 문제 없으며, yolo_capture 액션은 단순 이미지 저장만 함.
+
+QR 코드 인식이 필요 없다면 self.qr_detector = False로 비활성화하면 로그를 줄일 수 있다.
+
+필요하면 robot.py 안에서 어떻게 바꿔야 하는지도 예시 들어줄게. 이 정도로 정리되면 바로 테스트해볼 수 있을 거야. 준비됐으면 YOLO 연동까지도 다음 단계로 넘어가자.
+
+나의 말:
+그러면 aruco_trigger_capture_yolo.py는 고칠 게 없다는 거야?(있다면 알려주고) 나머지 부분은 어디를 어떻게 고치면 될지 정리좀
+ChatGPT의 말:
+좋아, 명확하게 정리해줄게.
+aruco_trigger_capture_yolo.py 자체는 현재 상태로 "정상 작동 가능"한 상태야. 다만, 너의 프로젝트에 실제로 통합해서 동작시키려면 다른 코드 몇 군데를 꼭 손 봐야 해.
+
+✅ 1. aruco_trigger_capture_yolo.py 파일 자체
+코드 수정 필요 없음.
+
+단, Python 2용 f-string을 .format() 등으로 이미 잘 바꿨고, QR 인식 실패 대비도 되어 있어.
+
+경로 설정이나 ROS 메시지 타입 등도 잘 처리되어 있음.
+
+단독 테스트 시에도 이미지 저장, 회전, YOLO 캡처 정상 작동할 수 있어.
+
+🔧 단순히 이름을 기존 aruco_trigger.py 대신 쓴다는 전제로 문제 없음.
+
+✅ 2. 프로젝트 나머지 코드에서 "반드시 수정해야 할 부분"
+🔁 A. import 경로 수정
+robot.py 또는 다른 컨트롤 스크립트에서 아래와 같이 되어 있을 거야:
+
+from core.detection.aruco_trigger import ArucoTrigger
+➡️ 바꿔줘:
+
+from core.detection.aruco_trigger_capture_yolo import ArucoTrigger
+🔎 단, 클래스 이름은 ArucoTrigger 그대로 유지했으므로 import 경로만 바꾸면 됨.
+
+🔁 B. 메인 루프 안에서 이 함수들이 호출되고 있는지 확인
+aruco_trigger.observe_and_maybe_trigger(bgr_img)
+aruco_trigger.step()
+observe_and_maybe_trigger: 마커를 찾아 액션을 pending 리스트에 쌓음
+
+step: pending 리스트의 액션을 하나씩 실행
+
+보통 robot.py 같은 곳에서 카메라 프레임을 받아서 처리할 텐데, 거기서 이 두 함수가 프레임마다 호출되도록 되어 있는지 확인 필요해.
+
+✅ 예시 (robot.py 안의 흐름 예상):
+# 초기화
+self.aruco_trigger = ArucoTrigger()
+
+def camera_callback(self, msg):
+    bgr_img = self.bridge.compressed_imgmsg_to_cv2(msg)
+    
+    self.aruco_trigger.observe_and_maybe_trigger(bgr_img)
+    self.aruco_trigger.step()
+만약 observe_and_maybe_trigger()만 있고 step() 호출이 없다면, 회전이나 캡처가 안 일어날 수 있어.
+
+🧹 3. (선택) QR 로그 없애고 싶다면
+QR 코드 로그를 없애고 싶으면 ArucoTrigger.__init__() 내에 아래 줄을 추가하거나 수정:
+
+self.qr_detector = False
+혹은 아예 _process_qr_codes() 함수 본문에 return만 넣어도 돼.
+
+✅ 정리하면
+수정 위치	수정 내용
+src/core/detection/aruco_trigger_capture_yolo.py	❌ 수정 필요 없음
+robot.py 등에서 import	from core.detection.aruco_trigger → aruco_trigger_capture_yolo
+main loop / camera 콜백	observe_and_maybe_trigger() + step() 호출 포함돼야 함
+QR 로그 제거 (선택)	self.qr_detector = False 설정 또는 함수 무력화
+이제 위 내용만 반영되면 바로 테스트 가능할 거야.
+필요하면 robot.py의 camera 콜백 전체 흐름도 같이 봐줄 수 있어. 원하면 올려줘!
+
+나의 말:
+image_yolo.py는 다른 프로세스로 따로 돌려야 하는 걸로 알고 있는데 기존에 내가 준 코드에서 뭐뭐를 수정했어?
+ChatGPT의 말:
+좋은 포인트 짚었어. 네가 처음 제공한 image_yolo.py는 독립 실행 프로세스(즉, ROS 노드가 아닌 일반 Python 스크립트)로 잘 구성되어 있었어. 내가 수정한 버전은 아래 기준을 지켜 Python 2와 기존 프로젝트 구조를 염두에 둔 소폭 정리만 반영한 거고, 근본 구조나 로직은 거의 그대로 유지했어.
+
+✅ 수정한 주요 내용 요약
+항목	수정 내용	이유
+✅ f-string 제거	f"YOLO image saved: {filename}" → "YOLO image saved: {}".format(filename)	Python 2 호환성
+✅ print() 함수 → 문법	print() → print "" 스타일	Python 2에서 함수 형태 print() 사용 시 오류
+✅ torch 임포트 처리	torch가 없을 경우 예외 처리	GPU 미탑재 환경 대비
+✅ os.path.expanduser() 정리	동일 경로 보존, .format()으로 경로 출력	호환성 유지
+✅ YOLO 모델 로딩 경로	YOLO('config/best_rokaf.pt') 그대로 유지	경로는 사용자가 배치하면 됨
+❗ 수정하지 않은 주요 사항 (즉, 기존 코드 유지)
+YOLO 추론 로직 (ultralytics.YOLO) 호출 구조 그대로 유지
+
+while True 루프 유지
+
+SLEEP_SEC 주기로 새 이미지 파일 감시
+
+누적 클래스 카운트 및 이미지별 카운트 출력
+
+🔧 지금 이 상태에서 어떻게 돌려야 하냐면:
+터미널에서 별도로 실행 (ROS 노드랑은 독립):
+
+cd ~/catkin_ws/src/ROKAF_Autonomous_Car_2025/src/core/detection/
+python2 image_yolo.py
+YOLO 모델(best_rokaf.pt) 경로가 정확해야 하고, 그 경로는 image_yolo.py 내에서 이렇게 되어 있어:
+
+MODEL = YOLO('config/best_rokaf.pt')
+=> 이건 실제 경로에 맞춰서 바꿔주면 돼. 예를 들어 ~/catkin_ws/src/ROKAF_Autonomous_Car_2025/configs/best_rokaf.pt에 있다면:
+
+MODEL = YOLO('../../configs/best_rokaf.pt')
+✅ 결론
+YOLO 실행은 ROS와 별도로 계속 독립 프로세스로 돌려야 함 (네 판단이 맞음).
+
+수정은 모두 Python 2 대응에 한정되어 있고, 기존 로직에는 손 안 댔음.
+
+YOLO 모델 경로(config/best_rokaf.pt)만 현재 디렉토리 기준 맞춰서 수정해주면 바로 실행 가능.
+
+필요하다면 ROS 노드 형태(rospy.init_node() 등)로 포팅도 가능하지만, 지금 구조에서는 지금 방식이 간단하고 안정적이야. 추가로 원하면 ROS 노드 버전도 만들어줄게.
+
+나의 말:
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import os
+import time
+from collections import defaultdict
+
+import cv2
+from ultralytics import YOLO
+
+# Optional: use PyTorch to check for GPU availability
+try:
+    import torch
+except ImportError:
+    print("Warning: torch module not found. Install torch for optimal performance.")
+    torch = None
+
+# Choose inference device (GPU if available, otherwise CPU)
+if torch and torch.cuda.is_available():
+    INFERENCE_DEVICE = 0  # GPU device index (0 for first GPU)
+    print(f"YOLO will use GPU (Device: {INFERENCE_DEVICE}).")
+else:
+    INFERENCE_DEVICE = 'cpu'
+    print("YOLO will use CPU.")
+
+# Load the YOLO model (assuming the model weights are at 'config/best_rokaf.pt')
+MODEL = YOLO('config/best_rokaf.pt')
+# Confidence threshold for detections
+CONFIDENCE_THRESHOLD = 0.3
+
+# Directory where ArucoTrigger saves YOLO images
+IMAGE_DIR = os.path.expanduser("~/catkin_ws/src/ROKAF_Autonomous_Car_2025/yolo_images")
+# Interval (seconds) between directory scans
+SLEEP_SEC = 1.0
+
+def main():
+    # Dictionary to accumulate total counts per class
+    class_counts = defaultdict(int)
+    # Set to keep track of processed file names
+    processed_files = set()
+
+    if not os.path.isdir(IMAGE_DIR):
+        raise RuntimeError(f"Image directory does not exist: {IMAGE_DIR}")
+
+    print("[YOLO] Watching directory:", IMAGE_DIR)
+    print("[YOLO] Press Ctrl+C to stop.\n")
+
+    while True:
+        # List all image files in the directory (jpg, jpeg, png) and sort them
+        filenames = [f for f in os.listdir(IMAGE_DIR) if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+        filenames.sort()
+
+        # Identify new files that haven't been processed yet
+        new_files = [fname for fname in filenames if fname not in processed_files]
+
+        if new_files:
+            for fname in new_files:
+                full_path = os.path.join(IMAGE_DIR, fname)
+                img = cv2.imread(full_path)
+
+                # If image failed to load (e.g., incomplete file), skip it
+                if img is None:
+                    print("[WARN] Failed to read image:", full_path)
+                    processed_files.add(fname)
+                    continue
+
+                # Run YOLO inference on the image
+                results = MODEL(img, verbose=False, device=INFERENCE_DEVICE)
+                # Dictionary for counts in this image
+                per_image_counts = defaultdict(int)
+
+                # Process results for this image
+                for r in results:  # results is a list (one entry per image, here only one image)
+                    if r.boxes is None:
+                        continue
+                    for box in r.boxes:
+                        conf = float(box.conf[0])
+                        if conf < CONFIDENCE_THRESHOLD:
+                            continue  # skip detections below confidence threshold
+                        class_id = int(box.cls[0])
+                        label = MODEL.names[class_id]  # get class name
+                        # Update counts
+                        class_counts[label] += 1
+                        per_image_counts[label] += 1
+
+                # Mark this file as processed
+                processed_files.add(fname)
+
+                # Log detection counts for this image
+                print(f"=== Image processed: {fname} ===")
+                if per_image_counts:
+                    print("  [per-image counts]")
+                    for label, count in sorted(per_image_counts.items()):
+                        print(f"   - {label}: {count}")
+                else:
+                    print(f"  No objects detected over conf {CONFIDENCE_THRESHOLD:.2f}")
+                # Log cumulative counts so far
+                print("\n  [cumulative counts so far]")
+                for label, count in sorted(class_counts.items()):
+                    print(f"   - {label}: {count}")
+                print("================================\n")
+
+        # Sleep for a short interval before checking for new files again
+        time.sleep(SLEEP_SEC)
+
+if __name__ == "__main__":
+    main()
+
+----
+image_yolo.py는 python 3.8에서 yolo를 지원하는 환경에서 돌릴 거니까 거기에 맞게 다시 수정해주라.
+ChatGPT의 말:
+좋아, Python 3.8 + ultralytics YOLO 환경에 맞춰 다음 사항을 반영해 깔끔하게 리팩터링해줄게:
+
+✅ 반영할 사항
+f-string 복원 (Python 3.8 지원)
+
+print 문 Python 3 스타일 유지
+
+torch 임포트 관련 경고는 유지 (optional)
+
+경로 관련 에러 메시지 깔끔하게 처리
+
+ultralytics.YOLO inference 로직 간결화
+
+코드 포맷 정리
+
+✅ 수정된 image_yolo.py (Python 3.8용)
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import time
+from collections import defaultdict
+
+import cv2
+from ultralytics import YOLO
+
+# Optional: check for GPU availability
+try:
+    import torch
+except ImportError:
+    print("Warning: torch module not found. YOLO will use CPU.")
+    torch = None
+
+# Select inference device
+if torch and torch.cuda.is_available():
+    INFERENCE_DEVICE = 0
+    print(f"[YOLO] Using GPU (device {INFERENCE_DEVICE})")
+else:
+    INFERENCE_DEVICE = 'cpu'
+    print("[YOLO] Using CPU")
+
+# Load YOLO model
+MODEL = YOLO('config/best_rokaf.pt')
+CONFIDENCE_THRESHOLD = 0.3
+
+# Directory to watch
+IMAGE_DIR = os.path.expanduser("~/catkin_ws/src/ROKAF_Autonomous_Car_2025/yolo_images")
+SLEEP_SEC = 1.0
+
+def main():
+    class_counts = defaultdict(int)
+    processed_files = set()
+
+    if not os.path.isdir(IMAGE_DIR):
+        raise RuntimeError(f"[ERROR] Image directory does not exist: {IMAGE_DIR}")
+
+    print(f"[YOLO] Watching directory: {IMAGE_DIR}")
+    print("[YOLO] Press Ctrl+C to stop\n")
+
+    while True:
+        filenames = sorted(f for f in os.listdir(IMAGE_DIR) if f.lower().endswith((".jpg", ".jpeg", ".png")))
+        new_files = [f for f in filenames if f not in processed_files]
+
+        for fname in new_files:
+            full_path = os.path.join(IMAGE_DIR, fname)
+            img = cv2.imread(full_path)
+
+            if img is None:
+                print(f"[WARN] Failed to read image: {full_path}")
+                processed_files.add(fname)
+                continue
+
+            results = MODEL(img, verbose=False, device=INFERENCE_DEVICE)
+            per_image_counts = defaultdict(int)
+
+            for r in results:
+                if not r.boxes:
+                    continue
+                for box in r.boxes:
+                    conf = float(box.conf[0])
+                    if conf < CONFIDENCE_THRESHOLD:
+                        continue
+                    class_id = int(box.cls[0])
+                    label = MODEL.names[class_id]
+                    class_counts[label] += 1
+                    per_image_counts[label] += 1
+
+            processed_files.add(fname)
+
+            print(f"=== Image processed: {fname} ===")
+            if per_image_counts:
+                print("  [Per-image counts]")
+                for label, count in sorted(per_image_counts.items()):
+                    print(f"   - {label}: {count}")
+            else:
+                print(f"  No objects detected above conf {CONFIDENCE_THRESHOLD:.2f}")
+
+            print("\n  [Cumulative counts so far]")
+            for label, count in sorted(class_counts.items()):
+                print(f"   - {label}: {count}")
+            print("================================\n")
+
+        time.sleep(SLEEP_SEC)
+
+if __name__ == "__main__":
+    main()
+🔧 요약
+Python 3.8 스타일로 리팩터링 완료
+
+독립 실행 가능한 스크립트 유지 (rosrun 필요 없음)
+
+모델 경로만 정확히 존재하면 바로 작동
+
+필요하다면 경로를 .yaml 설정파일로 뺄 수도 있어. 원하면 그렇게도 구성해줄게.
+
+나의 말:
+https://github.com/tjdans6342/maicon_preparation
+----
+이 레피지토리 이해하고 있지?
+ChatGPT의 말:
+응, 너가 준 레포지토리는 다음과 같은 구조와 목적을 갖고 있다는 걸 파악하고 있어:
+
+✅ 핵심 개요
+자율주행 로봇 시스템을 위한 ROS 기반 Python 코드들로 구성
+
+주요 기능은 다음과 같아:
+
+차선 인식 (lane_detector.py)
+
+화재 감지 (fire_detector.py) – 아직 리팩터링 안 한 상태
+
+ArUco 마커 기반 이벤트 트리거 (aruco_trigger.py) → 네가 현재 확장한 파일은 aruco_trigger_capture_yolo.py
+
+PID 제어 (pid_controller.py)
+
+로봇 전체 흐름 제어 (controller.py, robot.py)
+
+YOLO 기반 이미지 분류 (image_yolo.py) → 독립 실행 프로세스로 작동
+
+📁 디렉토리 구조 요약 (정리 기준)
+src/
+├── configs/               # 설정 파일
+├── core/
+│   ├── detection/         # ArUco, Lane, Fire 감지 모듈
+│   └── control/           # PID, Controller
+├── main/                  # 실행 진입점 (robot.py)
+├── utils/                 # 이미지 유틸 함수 등
+🔄 현재까지 작업 정리
+aruco_trigger_capture_yolo.py → 기존 aruco_trigger.py를 확장한 버전, 마커 ID에 따라 YOLO 추론용 이미지 캡처 포함
+
+image_yolo.py → Python 3.8 / YOLOv8에 맞게 리팩터링
+
+ROS 노드 통신 구조와 파일 저장 경로 (~/catkin_ws/src/ROKAF_Autonomous_Car_2025/...) 그대로 유지
+
+필요하면 robot.py에서 이 확장된 trigger를 사용하도록 연결하는 부분도 정리해줄 수 있어. 원할까?
+
+나의 말:
+업로드한 이미지
+03_robot_led_top.ipynb
+파일
+01_robot_camera_stream_lowquality.ipynb
+파일
+04_robot_camera_qrcode.ipynb
+파일
+05_robot_camera_aruco.ipynb
+파일
+02_robot_camera_capture.ipynb
+파일
+03_robot_api.ipynb
+파일
+근데 실제 대회에서는 tiki 라이브러리를 제공해준단 말이야. 그래서 "I/O 인터페이스만 추상화해서 두 환경 모두에 대응하는 구조로 설계" 하려고 하거든? tiki 라이브러리 예제 코드도 첨부할게. 내가 그렇게 하려는 작업이라는 것만 일단 인지해둬
+ChatGPT의 말:
+좋아요, 지금까지 흐름을 정리하면 다음과 같아요:
+
+✅ 상황 요약
+현재 코드는 ROS 환경 + Python 2 + ArUco + YOLO 추론 기반.
+
+최종 대회 환경에서는 ROS가 아닌 tiki 라이브러리 기반 I/O 인터페이스를 사용.
+
+따라서 플랫폼 간 호환을 위해 하드웨어 제어 추상화 계층을 설계하려는 것.
+
+너가 말한 "두 환경 모두에 대응하는 구조"란:
+
+같은 논리/알고리즘 구조를 유지하되,
+
+ROS 환경에서는 rospy, geometry_msgs.msg.Twist, cv_bridge, cv2.VideoCapture 등을 사용하고,
+
+tiki 환경에서는 set_motor_power, log, get_imu 같은 함수를 직접 호출하는 방식으로 컨트롤러 계층만 바꾼다는 의미.
+
+✅ 작업 목표 인지 상태
+maicon_preparation 레포 구조와 ArUco 기반 로직 인지하고 있음.
+
+image_yolo.py, aruco_trigger_capture_yolo.py 분리 운영도 이해 완료.
+
+제공된 tiki 라이브러리 예제(.ipynb)와 API 문서 기반으로 I/O 추상화 필요성 인지함.
+
+🔜 다음 단계에서 할 수 있는 것
+인터페이스 설계:
+예를 들어 이런 식의 추상화 클래스를 설계할 수 있음:
+
+class MotorInterface(object):
+    def set_speed(self, left, right):
+        raise NotImplementedError
+
+    def stop(self):
+        raise NotImplementedError
+그리고:
+
+ROS에서는 ROSCarController(MotorInterface)
+
+Tiki에서는 TikiCarController(MotorInterface)
+식으로 구현.
+
+추상화 기반 구조 리팩토링:
+ArucoTrigger, image_yolo.py 등에서 직접 Twist를 사용하지 않고, 추상 인터페이스를 통해 로봇을 제어하도록 구조 변경.
+
+✅ 확인 차원 질문
+아래 내용을 확인해주면 다음 설계 진행에 더 도움이 돼요:
+
+aruco_trigger_capture_yolo.py도 향후 tiki 환경에 이식할 예정인가요?
+
+추상화 계층은 모터 제어만 할 건지, 아니면 카메라 / 이미지 캡처 / 디렉토리 저장 등도 포함할지?
+
+image_yolo.py는 별도 PC에서 계속 실행한다고 가정할까요? (즉 tiki 환경과는 연동 X?)
+
+필요하시면 MotorInterface, CameraInterface, LogInterface 형태로 틀 잡아서 보여드릴게요.
+
+나의 말:
+cursor에서 작업하려면 어떤 모델이 좋을까?
+ChatGPT의 말:
+Cursor(코드 편집기 기반 AI 툴)에서 현재 프로젝트 같은 로봇 제어, ROS 기반 아키텍처, 그리고 추상화 I/O까지 다루려는 경우라면, 아래 기준으로 모델을 선택하는 게 가장 적절합니다:
+
+✅ 추천 모델: GPT-4 Turbo (gpt-4-1106-preview)
+이유:
+항목	설명
+💡 대규모 코드베이스 대응	Cursor는 한 번에 100k 토큰 이상 읽을 수 있기 때문에, GPT-4 Turbo는 폴더 구조, 파일 여러 개, 긴 주석 등을 한 번에 이해해서 추상화하거나 구조 변경에 유리함
+🧠 맥락 기억력	ArUco, YOLO, ROS, tiki 라이브러리처럼 서로 다른 API와 추상 계층을 연계할 때, 모델의 일관된 추론 능력이 중요
+🔧 엔지니어링 지식	단순 문법 보완이 아니라, ROS topic 구조나 센서-제어 연계 로직을 이해하고 설계할 수 있는 모델이 필요
+🛠️ Refactor + Interface 디자인	Interface 기반 추상화(예: MotorInterface)나 Adapter 패턴을 쓸 때도 GPT-4 Turbo가 구조적으로 제안 가능
+⚠️ 회피 추천: GPT-3.5
+짧은 코드 수정이나 Docstring 정리는 가능하지만,
+
+긴 컨텍스트 연결
+
+시스템 아키텍처 설계 (예: ROS ↔ Tiki 추상화)
+는 잘 못함.
+
+☑️ 부가 팁: Cursor 사용 시
+팁	설명
+💡 Explain this	기존 aruco_trigger_capture_yolo.py 같은 복잡한 클래스에서 각 함수별 요약 가능
+🧩 Generate types	인터페이스 추출할 때 유용 (예: MotorInterface 자동 생성)
+🔁 Refactor this	ROS 기반 제어를 self.motor.set_power() 같은 추상화 구조로 바꿀 때 유리
+📂 폴더 선택 후 Ask	src/core/ 전체 구조를 요약해달라거나, 어디를 리팩터링해야 할지 분석 가능
+✅ 결론
+모델 추천: gpt-4-1106-preview (GPT-4 Turbo)
+이유: 구조적 이해력 + 긴 맥락 + 추상화 설계 대응
+환경: Cursor + GPT-4 Turbo 조합으로 시작하면 인터페이스 리팩터링 작업 효율이 매우 높아질 거야.
+
+필요하면 Cursor에서 작업할 때 쓸 수 있는 추상화 템플릿도 예시로 짜줄게.
+
+나의 말:
+리팩토링할 레포지토리 주소: https://github.com/tjdans6342/maicon_preparation
+그래서 리팩토링을 해야 하자나. 그래서 너한테 디테일한 설계를 맡긱 그거를 cursor를 이용해서 작업하려고 해! cursor한테 말해줄 프롬프트 작성해줘. 
+- I/O 인터페이스만 추상화해서 두 환경 모두에 대응하는 구조로 설계
+- 따로 뺄 수 있는 기능은 함수로 모듈화 (예를 들어, 포트홀 판단하는 로직을 클래스 메서드에서 전부 처리하지 말고, 이진 이미지를 넘겨주면 True, False로 반환하는 check_binary_image_pothole()이런 모듈 함수로 뺴는 거지
+- 그리고 추가적으로 더 좋은 구조 있으면 알아서 설계해주고 설명해주면 좋겠어.
+ChatGPT의 말:
+좋은 방향이야! Cursor에 전달할 프롬프트를 설계할 때 다음 정보가 추가되면 더 정교하게 만들 수 있어:
+
+두 환경의 I/O 계층에서 바뀌는 부분이 정확히 어디까지인지 알려줄 수 있어? 예: 모터 제어, 카메라 입력, 로깅 등 전체인지 일부인지.
+
+추상화 인터페이스는 어떤 방식으로 연결하고 싶어? (예: 클래스 기반 interface, adapter pattern, DI 등 선호 방식)
+
+check_binary_image_pothole 같은 유틸 함수는 어떤 기능들을 대상으로 분리하고 싶은지 예시가 더 있을까?
+
+이 3가지만 간단히 알려주면 바로 Cursor 프롬프트용 설계 요청서 만들어줄게!
+
+나의 말:
+03_robot_api.ipynb
+파일
+03_robot_led_top.ipynb
+파일
+01_robot_camera_stream_lowquality.ipynb
+파일
+04_robot_camera_qrcode.ipynb
+파일
+05_robot_camera_aruco.ipynb
+파일
+02_robot_camera_capture.ipynb
+파일
+1. 내가 첨부해준 tiki 예제 코드 보고 너가 잘 파악해줘.
+2. 크래스 기반 interface
+3. 분리할 수 있는 건 되도록 다 분리하고 싶어. (클래스를 비교적 간단하게 유지하고 싶음)
+ChatGPT의 말:
+좋아, maicon_preparation 레포지토리를 리팩토링하기 위한 설계 프롬프트를 Cursor에 전달할 수 있도록 준비할게. 추상화 I/O 구조, 함수 분리, 그리고 구조적 개선까지 포함해서 적절한 설계 요청서를 만들어줄게. 곧 공유할게!
+
+Research completed in 10m· 출처 3개· 검색 41건
+1. I/O 인터페이스 추상화 (클래스 기반)
+ROS와 Tiki 환경의 하드웨어 제어 방식을 통합하기 위해 추상 클래스 기반의 I/O 인터페이스를 도입합니다. 각 하드웨어 기능별로 인터페이스를 정의하고, ROS용과 Tiki용으로 각각 구현합니다. 예를 들어:
+모터 제어: MotorInterface 추상 클래스를 정의하고, set_speed(left, right)와 stop() 등의 메서드를 선언합니다.
+ROSMotorController: MotorInterface를 구현하여 ROS에서는 rospy.Publisher 등을 통해 /cmd_vel 토픽에 Twist 메시지를 발행하는 방식으로 모터 속도를 제어합니다 (예: set_speed에서 Twist.linear.x와 Twist.angular.z 설정 후 publish).
+TikiMotorController: MotorInterface를 구현하여 Tiki 라이브러리의 API 호출로 모터를 제어합니다. 예를 들어 set_speed(left, right)에서 Tiki의 set_motor_power 또는 고수준 동작 함수를 호출하고, stop()에서는 tiki.stop()을 호출합니다. Tiki API는 -127~127 범위의 PWM 값을 사용하므로, set_speed에서 입력 속도를 해당 범위로 변환해 전달합니다. Tiki에서는 tiki.set_motor_power(…)나 전/후진 등의 편의 메서드(forward, backward 등)를 제공합니다. 이러한 세부사항은 TikiMotorController 내부에 숨겨집니다.
+카메라 제어: CameraInterface를 정의하여 카메라 이미지 캡처 기능을 추상화합니다.
+ROSCamera: ROS에서는 sensor_msgs/Image 토픽을 구독하고 콜백으로 이미지를 받아 OpenCV 형식으로 변환하거나, 혹은 OpenCV VideoCapture를 사용해 Jetson 카메라 파이프라인을 직접 열 수도 있습니다.
+TikiCamera: Tiki 환경에서는 별도의 카메라 API가 없다면 OpenCV의 GStreamer 파이프라인으로 직접 카메라를 엽니다 (예: cv2.VideoCapture로 Jetson Nano 카메라를 열고 프레임을 읽음). CameraInterface.capture() 메서드는 내부적으로 환경별 방식으로 한 프레임을 얻어 반환하도록 구현합니다.
+OLED 디스플레이 (로그 출력): DisplayInterface를 정의하여 텍스트 로그 출력을 추상화합니다.
+ROSDisplay: ROS에서는 OLED가 없으므로 대체로 rospy.loginfo나 터미널 출력으로 대체할 수 있습니다. ROSDisplay.log(msg)는 콘솔에 출력하고, log_clear()는 ROS에는 의미 없으므로 화면출력 지우기 기능을 생략하거나 최근 로그를 지우는 형태로 흉내냅니다.
+TikiDisplay: Tiki 라이브러리의 tiki.log("...")와 tiki.log_clear()를 호출하여 OLED에 메시지를 표시/초기화합니다. 예를 들어 DisplayInterface.log(msg) 구현에서 tiki.log(msg)를 호출하게 합니다.
+LED 제어: LEDInterface를 정의하여 로봇의 LED 스트립/라이트 제어를 추상화합니다.
+ROSLedController: ROS 환경에서 해당 LED가 존재한다면 ROS 토픽/서비스로 제어하거나, 없을 경우 Dummy 구현으로 넘어갑니다. 예를 들어 LED가 없으면 함수 호출시 로그만 남기는 방식으로 구현합니다.
+TikiLedController: Tiki의 set_led(direction, index, R, G, B) API를 사용합니다. 예를 들어 LEDInterface.set_color(position, color) 등을 정의해 Tiki에서는 해당 위치의 LED 색상을 설정하고, ROS에선 지원되지 않으면 무시하도록 합니다. 여러 LED를 일괄 제어할 경우 루프로 tiki.set_led를 호출하는데, 이런 구현은 Tiki 전용 클래스 내부에 캡슐화합니다.
+IMU 센서: IMUInterface를 정의하여 가속도/자이로 등의 IMU 값을 얻는 메서드를 명시합니다 (예: get_acceleration(), get_gyro()).
+ROSImu: ROS에서는 /imu/data와 같은 토픽을 구독하거나 필요한 경우 sensor_msgs/Imu 메시지를 이용합니다. 최신 값을 유지하다가 get_acceleration() 호출시 최근 값을 반환하거나 블로킹 대기 후 반환하도록 구현합니다.
+TikiImu: Tiki의 IMU 인터페이스 tiki.get_imu()를 호출하여 [ax, ay, az] 값을 얻습니다. 필요에 따라 보정이나 단위 변환을 수행합니다. 자이로값이 필요하면 Tiki API에 해당 함수가 있을 경우 호출하고, 없으면 IMU는 가속도만 지원한다고 간주합니다.
+이러한 추상 인터페이스들을 한 곳에 모아 interface/ 디렉토리나 platform/ 디렉토리로 분리합니다. 예를 들어 interface/motor_interface.py에 MotorInterface를, platform/tiki/motor_controller.py에 TikiMotorController, platform/ros/motor_controller.py에 ROSMotorController를 구현하는 식입니다. 이를 통해 메인 코드에서는 구체적인 하드웨어 API를 알 필요 없이, MotorInterface 타입으로 모터를 제어할 수 있습니다.
+Adapter 패턴 적용: 이러한 구조는 GoF의 Adapter(어댑터) 패턴과 유사합니다. 한쪽에는 프로그램의 표준 인터페이스(MotorInterface 등)가 있고, 어댑터 클래스(TikiMotorController/ROSMotorController)가 실제 서비스 클래스(Tiki API 혹은 ROS 기능)를 감싸 호환시켜줍니다. 어댑터는 내부에서 서로 다른 인터페이스의 호출을 변환하여, 클라이언트 코드(우리의 메인 로직)가 변경 없이도 서로 다른 환경에서 동작하도록 합니다
+refactoring.guru
+. 결과적으로 ROS ↔ Tiki 간 I/O 제어 방식 차이를 객체 지향적으로 흉내내어, 코드 중복 없이 두 환경을 모두 지원할 수 있게 됩니다.
+2. 기능 함수 분리 (모듈화)
+기존 코드에서 한 클래스가 너무 많은 세부 로직을 담고 있었다면, 이를 독립적인 유틸리티 함수들로 분리하여 모듈화합니다. 이렇게 하면 코드 재사용성과 테스트 용이성이 크게 높아집니다. 아래와 같은 보조 기능들을 별도 함수로 분리할 수 있습니다:
+포트홀(pothole) 감지 함수 – 예: check_binary_image_pothole(bin_img: np.ndarray) -> bool
+흑백 이진화된 영상에서 포트홀(도로 함몰이나 구멍)을 감지하는 로직을 함수로 분리합니다. 구현 방식으로, 예를 들어 영상에서 특정 크기 이상의 검은 영역을 찾거나 컨투어 분석을 통해 포트홀로 의심되는 패턴이 있는지 판단할 수 있습니다. 이 함수는 이진 영상 bin_img를 입력 받아 포트홀이 존재하면 True/없으면 False를 리턴합니다. 이렇게 분리하면 LaneDetector 등의 클래스에서 이미지마다 이 함수를 호출해 결과만 받아 쓰면 되므로, 클래스 코드가 깔끔해집니다. 또한 단위 테스트 시에도 다양한 샘플 영상으로 이 함수를 개별적으로 검증할 수 있습니다.
+마커 유효성 판단 함수 – 예: is_valid_marker(ids: list[int]) -> bool 또는 filter_marker_ids(ids: list[int]) -> list[int]
+ArUco 마커 인식 결과로 얻은 ID 목록에서 유효한 마커인지 판정하는 로직을 함수로 분리합니다. 예를 들어 대회에서 특정 ID의 ArUco만 트리거로 사용한다면, 감지된 ID가 그 목록에 포함되는지 확인합니다. 또는 동일 마커의 중복 감지를 방지하기 위해 일정 시간 내 이미 처리한 마커 ID는 무시한다든지, 거리/각도 기준으로 오탐 여부를 걸러내는 등의 로직도 이 함수에서 수행할 수 있습니다.
+def is_valid_marker(detected_ids: list[int], last_detect_time: float) -> bool:
+    """감지된 ArUco ID가 유효하며, 연속 중복이 아닌지 검사"""
+    # 예시 구현: 특정 ID(예: 5번)를 찾으며, 최근 5초 내 이미 감지했다면 무효
+    target_id = 5
+    if target_id in detected_ids:
+        if time.time() - last_detect_time > 5:
+            return True
+    return False
+위와 같은 함수는 ArucoTrigger 클래스에서 마커를 감지할 때 호출되고, 반환값에 따라 이후 동작(예: 이미지 캡처 실행 여부)을 결정하게 됩니다.
+이미지 저장 함수 – 예: save_image(img: np.ndarray, prefix: str = "") -> str
+로봇이 특정 이벤트(포트홀 감지, 마커 감지 등) 발생 시 이미지를 파일로 저장해야 한다면, 그 로직을 공통 함수로 분리합니다. 파일 경로 생성(prefix나 타임스탬프 기반 파일명), 디렉토리 존재여부 확인 및 생성, OpenCV를 통한 저장(cv2.imwrite) 등의 처리를 캡슐화합니다. 이렇게 하면 여러 클래스(ArucoTrigger, LaneDetector 등)에서 중복 코드를 피하고 일관된 방법으로 이미지를 저장할 수 있습니다.
+회전 시간 계산 함수 – 예: compute_turn_duration(angle_deg: float, speed: float) -> float
+로봇이 특정 각도로 회전해야 할 때 모터를 얼마나 오래 구동해야 하는지 계산하는 로직을 함수화합니다. 예를 들어 각속도나 실험적 캘리브레이션 값을 이용해 angle_deg (회전할 각도)와 현재 회전 속도(speed)를 넣으면 필요한 시간(초)을 반환하도록 합니다. Controller 클래스는 이 함수를 호출하여 회전 동작을 시간 지연 기반으로 수행할 수 있습니다. (향상된 방법으로 IMU의 자이로 데이터를 이용해 목표각까지 회전하는 루프를 짤 수도 있지만, 일단 기존 코드 로직이 시간 기반이라면 그 부분만 분리합니다.)
+캡처 조건 체크 함수 – 예: should_capture(current_frame: int, last_capture_frame: int, condition: Any) -> bool
+영상이나 센서 데이터 흐름 중 특정 조건에서만 캡처/처리를 하도록 한다면, 그 판단을 하는 함수를 분리합니다. 예를 들어 ArucoTrigger에서 연속된 프레임 중 한 번만 캡처하도록 last_capture_frame과 current_frame을 비교하거나, LaneDetector에서 차선이 잘 인식되지 않으면 현재 프레임을 저장한다든지 하는 결정을 이 함수로 캡슐화할 수 있습니다.
+def should_capture_frame(frame_index: int, last_capture_index: int, interval: int = 30) -> bool:
+    """이전 캡처 이후 일정 프레임 간격이 지났으면 True 반환"""
+    return (frame_index - last_capture_index) >= interval
+이런 함수가 있으면, 매 프레임 처리 시 일일이 조건식을 쓰는 대신 if should_capture_frame(i, last_saved_i): save_image(frame)처럼 명확하게 작성할 수 있습니다.
+위의 예시들처럼 모든 복잡한 로직을 개별 함수로 쪼개면, 주 클래스 코드가 훨씬 간결해집니다. 각 함수는 utils/ 패키지나 관련 모듈(detection_utils.py, control_utils.py 등)에 모아두면 좋습니다. 특히 단위 테스트 작성 시 이러한 함수들은 하드웨어 없이도 입력→출력 검증을 할 수 있어 품질 향상에 도움이 됩니다.
+3. 핵심 클래스 단순화 및 역할 분리
+상기한 인터페이스와 유틸 함수들을 도입한 후에는, 기존의 핵심 클래스들의 내부 구현을 과감히 정리합니다. ArucoTrigger, Controller, LaneDetector 등 주요 클래스는 본연의 역할(상태 관리, ROS 메시지 송수신, 이벤트 트리거링)에 집중하고, 세부 처리는 외부로 위임하도록 리팩토링합니다:
+ArucoTrigger 클래스:
+이 클래스는 ArUco 마커를 감지하여 특정 이벤트(예: 이미지 캡처나 경로 변경)를 트리거하는 역할입니다. 리팩토링 후 ArucoTrigger는 다음과 같은 구조를 가질 것입니다:
+상태: 최근 감지된 마커 ID나 시간 (last_marker_id, last_marker_time 등), 최근 캡처 시점 (last_capture_time 또는 프레임 번호) 등을 멤버로 유지합니다.
+I/O 의존성: 생성자에서 CameraInterface, LEDInterface, DisplayInterface 등을 주입받습니다. 이를 통해 카메라 접근이나 표시 장치를 직접 다루지 않고 인터페이스로 처리합니다. (예: self.camera.capture()로 프레임 획득, self.display.log("...")로 OLED에 로그 출력 등)
+동작: ROS 환경이라면 이 클래스 자체가 ROS 노드로서 /camera/image 토픽 콜백에서 프레임을 받고 처리할 수도 있고, Tiki 환경이라면 루프로 capture()를 호출해 주기적으로 프레임을 확인할 것입니다.
+로직: 프레임 처리 시 ArUco 검출은 OpenCV로 수행하고 (cv2.aruco.detectMarkers), 결과 ID 목록을 얻으면 유효성 판단 함수 (is_valid_marker)를 호출해 사용할 마커인지 확인합니다. 유효한 마커라면 캡처 조건 함수 (should_capture_frame 등)로 지금 이미지를 저장할지 결정하고, True일 경우 CameraInterface를 통해 이미지를 얻거나 이미 받아온 프레임을 이미지 저장 함수 (save_image)로 저장합니다. 또한 필요한 경우 LEDInterface로 LED를 깜빡이거나 (self.led.set_color() 등), DisplayInterface.log()로 OLED에 상태를 출력하는 등 부가 반응을 실행합니다.
+책임 제한: ArucoTrigger는 “어떤 조건에서 무엇을 할지” 결정만 하고, **“그것을 어떻게 할지”**는 모두 외부 모듈에 맡깁니다. 예를 들어 이미지를 어떻게 저장하는지는 모르고 save_image 유틸함수를 호출할 뿐이고, 하드웨어 제어는 interface 객체들에 위임합니다.
+Controller 클래스 (주행 제어):
+Controller는 차량의 주행 상태를 관리하고, 필요에 따라 속도를 조정하거나 회전 등의 동작 명령을 내리는 클래스입니다. 리팩토링 후 Controller의 개선 사항:
+상태: 현재 주행 모드 (mode – 직진, 회전, 정지 등), 목표 속도, 차선 오차 누적 등 제어에 필요한 상태만 유지합니다.
+I/O 의존성: MotorInterface와 IMUInterface를 주입받습니다. 이를 통해 모터 제어를 추상화합니다. 예를 들어 self.motor.set_speed(v_left, v_right)를 호출하면 ROS 환경에서는 Twist 메시지가 발행되고, Tiki 환경에서는 tiki.set_motor_power가 내부적으로 호출됩니다.
+동작: Controller는 아마도 LaneDetector나 ArucoTrigger로부터 신호를 받아 모드를 전환하거나 속도를 결정할 것입니다. 예를 들어 ArUco 마커를 통해 “정지” 명령을 받으면 self.motor.stop()을 호출하고, 포트홀이 감지되면 우회 회피를 위해 일정 각도로 회전 명령을 내릴 수 있습니다.
+로직: 세부 계산은 유틸 함수로 위임합니다. 예를 들어 회피를 위해 좌회전 90도를 해야 한다면, compute_turn_duration(90, current_speed)를 호출해 필요한 회전 시간을 얻고, 그 기간 동안 self.motor.set_speed(*turning_speed*)하고 time.sleep(duration) 후 self.motor.stop()하는 식의 고수준 로직만 가집니다. IMU가 활용된다면, 일정 각속도에서의 각도적분 대신 IMU의 yaw 값을 읽어 목표 각도에 도달했는지 확인하는 루프로 대체할 수도 있습니다 (추가 개선 사항). 핵심은 Controller 자체는 “언제 멈추고 언제 돌지” 결정에 집중하고, **“구체적으로 모터를 어떻게 회전시키고 시간을 잴지”**는 MotorInterface와 유틸 함수가 담당하도록 역할을 분리하는 것입니다.
+LaneDetector 클래스 (차선 인식):
+LaneDetector는 카메라 영상을 받아 차선을 감지하고, 주행 경로 수정이나 속도 조절 신호를 Controller에 전달합니다. 리팩토링 방안:
+상태: 최근 감지된 차선 중심 오프셋, 곡률, 포트홀 감지 여부 등을 상태로 가질 수 있습니다.
+I/O 의존성: CameraInterface를 통해 영상을 받거나, ROS에서는 /camera/image 콜백 내부에서 바로 OpenCV 처리를 할 수도 있습니다. (만약 ArucoTrigger와 LaneDetector가 모두 카메라를 쓴다면 한 노드에서 처리하거나, 별도로 카메라 노드 -> 두 detection 노드로 토픽을 분배할 수도 있지만, 여기선 구조 논의에 집중합니다.)
+로직: 이미지 처리 세부 단계 (예: 컬러 필터링, 에지 검출, 허프 변환 등)는 전부 유틸 함수로 분리합니다. 예를 들어 get_lane_mask(frame) -> np.ndarray, detect_lane_curve(mask) -> float (차선 곡률 또는 방향), detect_offset(mask) -> float (차선 중앙으로부터의 편차) 등의 함수를 utils/lane_utils.py 등에 구현합니다. LaneDetector 클래스는 매 프레임마다 이러한 함수를 호출해 결과만 얻고, 이를 기반으로 간단한 판단만 합니다. 예를 들어 차선 중앙 오프셋이 일정 임계치 이상이면 Controller에 “좌측으로 조향 필요” 신호를 보낸다거나, 차선이 안 보이면 정지 명령을 내리는 식의 결정 로직입니다.
+포트홀 감지: 만약 차선 영상에서 포트홀(도로 파손)을 감지하는 것도 이 클래스 책임이라면, 앞서 분리한 check_binary_image_pothole 함수를 활용합니다. 예를 들어 이진 차선 마스크를 얻은 후 추가로 바닥 영역을 검색하여 포트홀이 있다고 판단되면 Controller에 “포트홀 회피” 동작을 요청합니다. 이런 판단도 if check_binary_image_pothole(bin_img): controller.avoid_pothole()와 같이 한 줄로 표현되고, 세부 구현은 함수 내부에 감춰집니다.
+통신: LaneDetector는 ROS라면 /lane_info 같은 커스텀 메시지를 퍼블리시하거나, Controller 인스턴스를 직접 참조할 수도 있습니다. 구조상 MVC로 엄격히 하려면 Publisher/Subscriber로 decouple하는 게 좋지만, 코드 규모가 작다면 Controller 객체를 생성자 인자로 받아 self.controller.turn_left()처럼 직접 호출해도 됩니다. (이점: ROS 없이도 동작 가능하므로 시뮬레이션/테스트에 유리)
+이러한 클래스 구조 단순화를 통해 클래스 당 책임이 명확해집니다. 각 클래스는 “어떤 이벤트가 발생하면 무엇을 할지”만 결정하고, 실제 작업은 인터페이스나 유틸리티로 빠지기 때문에 코드 길이가 줄고 이해하기 쉬워집니다. 또한 ROS 환경과 Tiki 환경 모두에서 동작해야 하므로, ROS 노드는 가급적 **입출력 부분(토픽 수신/발행)**에만 한정하고, 로직은 공용 함수/클래스를 쓰도록 하면 동일한 코드가 Tiki (혹은 오프라인 모드)에서도 재사용됩니다.
+4. 유연성을 위한 디자인 패턴 적용
+설계 시 디자인 패턴을 활용하면 코드 구조를 더욱 견고하고 유연하게 만들 수 있습니다. 이번 리팩토링에서는 앞서 언급한 Adapter 패턴과 더불어 Strategy 패턴 등을 고려합니다:
+Adapter 패턴 (어댑터) – 앞서 I/O 인터페이스 추상화에서 구현한 방식 자체가 어댑터 패턴의 활용입니다. 서로 다른 인터페이스(ROS API vs Tiki API)를 통일된 형식으로 맞춰주는 클래스들을 두어, 런타임에 환경만 바꿔 끼우면 (MotorInterface 하나 쓰는 코드가 ROS에서든 Tiki에서든 동일하게 동작) 프로그램 전반을 수정하지 않고도 플랫폼 전환이 가능합니다
+refactoring.guru
+. 이 패턴은 새로운 하드웨어가 추가되더라도(예: 다른 타입의 로봇 제어 라이브러리) MotorInterface만 구현하면 나머지 코드 수정을 최소화할 수 있다는 이점이 있습니다.
+Strategy 패턴 – 전략 패턴은 행위 알고리즘을 캡슐화하여 교체 가능하게 만드는 패턴입니다. 이번 맥락에서 두 가지 활용 방향이 있습니다:
+환경 선택 전략: 예를 들어 프로그램 시작 시 ROS 모드인지 Tiki 모드인지에 따라 다른 전략의 I/O 바인딩을 설정하는 것을 말합니다. 구체적으로는 RobotController 초기화시 MotorInterface 파라미터로 ROS용 또는 Tiki용 구현체를 주입하는 것이 하나의 전략 선택입니다. 이 부분은 엄밀히 말하면 DI(Dependency Injection)에 가깝지만, 내부적으로 “전략”을 바꿨다고 볼 수도 있습니다. 실행 중에 바뀌지는 않겠지만, 코드 구조상 if/else 분기 없이 전략 주입으로 처리한다는 점이 깔끔합니다.
+동작 알고리즘 교체: 주행 제어 로직이나 감지 로직에 복수의 방법이 있을 때 전략 패턴을 쓸 수 있습니다. 예를 들어 LaneDetector에서 **“차선 인식 방법”**을 여러 가지 알고리즘으로 바꿔쓸 수 있도록 할 수 있습니다. 간단한 색상 기반 검출 vs. 딥러닝 모델 사용 등으로 LaneDetectionStrategy 인터페이스를 만들고 다양한 구현체를 넣을 수 있습니다. 이 대회 코드에 그런 복잡한 전략까지는 요구되지 않을 수도 있지만, 향후 확장성을 생각하면 구조를 그렇게 짜두면 좋습니다.
+또 다른 예로, Controller의 주행 제어 정책도 전략화할 수 있습니다. 예컨대 평상시에는 “차선을 따라 직진” 전략을 쓰다가, ArUco 마커가 나오면 “특정 행동 수행” 전략으로 일시 교체하는 식입니다. 구현상 상태 머신으로 짤 수도 있지만, 전략 패턴으로 각 상태의 행동을 분리하면 교체가 용이해집니다.
+기타 패턴 – 만약 코드 구조 변경이 크다면, Facade 패턴이나 Observer(Listener) 패턴도 고려됩니다. 예를 들어 ArucoTrigger, LaneDetector 등이 Controller에 이벤트를 통지하는 데 Observer 패턴을 쓰면 느슨한 결합으로 만들 수 있습니다. 혹은 Robot 메인 클래스가 여러 하위 모듈을 관리하는 파사드(Facade) 역할을 하도록 해도 됩니다. 하지만 우선은 Adapter와 Strategy 적용만으로도 요구사항은 달성하리라 보입니다.
+디자인 패턴을 적용할 때는 과도한 복잡도 증가를 경계해야 합니다. 여기서는 유지보수성과 확장성을 높이기 위한 선에서 적절히 적용하고, 코드에 주석을 통해 어떤 패턴을 썼고 어떻게 동작하는지 설명을 덧붙이는 것도 요구사항에 포함됩니다. 예를 들어 TikiMotorController 클래스 정의 위에 “# Adapter: MotorInterface -> Tiki library” 같은 주석을 남겨 개발자들이 의도를 쉽게 파악하도록 합니다.
+5. 리팩토링 후 구조 및 구현 제안
+요구사항에 따라 파일 및 클래스 구조를 정비하면 프로젝트의 디렉토리 구성은 다음처럼 바뀔 수 있습니다:
+maicon_preparation/
+├── interface/  # 추상 I/O 인터페이스 정의
+│   ├── motor_interface.py        # class MotorInterface (abstract base class)
+│   ├── camera_interface.py       # class CameraInterface
+│   ├── display_interface.py      # class DisplayInterface (OLED/Logging)
+│   ├── led_interface.py          # class LEDInterface
+│   └── imu_interface.py          # class IMUInterface
+├── platform/
+│   ├── ros/
+│   │   ├── ros_motor_controller.py    # class ROSMotorController(MotorInterface)
+│   │   ├── ros_camera.py              # class ROSCamera(CameraInterface)
+│   │   ├── ros_display.py             # class ROSDisplay(DisplayInterface)
+│   │   ├── ros_led.py                 # class ROSLedController(LEDInterface)
+│   │   └── ros_imu.py                 # class ROSImu(IMUInterface)
+│   └── tiki/
+│       ├── tiki_motor_controller.py   # class TikiMotorController(MotorInterface)
+│       ├── tiki_camera.py             # class TikiCamera(CameraInterface)
+│       ├── tiki_display.py            # class TikiDisplay(DisplayInterface)
+│       ├── tiki_led.py                # class TikiLedController(LEDInterface)
+│       └── tiki_imu.py                # class TikiImu(IMUInterface)
+├── src/
+│   ├── core/
+│   │   ├── control/
+│   │   │   └── controller.py          # class Controller (refactored to use interfaces)
+│   │   ├── detection/
+│   │   │   ├── aruco_trigger_capture_yolo.py  # class ArucoTrigger (refactored)
+│   │   │   └── lane_detector.py       # class LaneDetector (refactored)
+│   │   └── detection_utils.py        # (optional) helper functions or classes for detection
+│   └── utils/
+│       ├── image_utils.py            # e.g. save_image, etc.
+│       ├── marker_utils.py           # e.g. is_valid_marker, etc.
+│       ├── motion_utils.py           # e.g. compute_turn_duration, etc.
+│       └── __init__.py
+├── main/
+│   └── robot.py        # 메인 실행 스크립트: 전체 초기화 및 루프/ROS 노드 스핀
+└── (기타 파일들)
+위 구조에서 핵심은 interface/와 platform/ 폴더로 ROS/Tiki별 구현을 깔끔히 분리한 점입니다. main/robot.py (혹은 main.launch.py)에서는 실행 환경에 따라 적절한 구현체를 주입하여 core 클래스를 초기화합니다. 예를 들어, ROS로 실행하면:
+# robot.py (일부 발췌)
+from interface.motor_interface import MotorInterface
+from platform.ros.ros_motor_controller import ROSMotorController
+from platform.ros.ros_camera import ROSCamera
+# ... (필요한 인터페이스 불러오기)
+
+if __name__ == "__main__":
+    # 환경 설정, 예: 인자나 환경변수로 "ROS" 또는 "TIKI" 판별
+    env = os.getenv("ROBOT_ENV", "ROS")
+    if env == "ROS":
+        motor = ROSMotorController()
+        camera = ROSCamera()
+        display = ROSDisplay()
+        led = ROSLedController()
+        imu = ROSImu()
+    else:  # "TIKI"
+        motor = TikiMotorController()
+        camera = TikiCamera()
+        display = TikiDisplay()
+        led = TikiLedController()
+        imu = TikiImu()
+
+    controller = Controller(motor_interface=motor, imu_interface=imu)
+    lane_detector = LaneDetector(camera_interface=camera, controller=controller)
+    aruco_trigger = ArucoTrigger(camera_interface=camera, controller=controller, 
+                                 led_interface=led, display_interface=display)
+    # ROS 환경이면 rospy.spin() 등, Tiki이면 수동 루프 실행
+    if env == "ROS":
+        rospy.init_node('robot_main')
+        ...
+        rospy.spin()
+    else:
+        # Tiki 환경: 수동으로 주기적 작업 실행
+        while True:
+            frame = camera.capture()
+            lane_detector.process_frame(frame)    # LaneDetector에 수동으로 프레임 공급
+            aruco_trigger.process_frame(frame)   # (혹은 두 클래스 중 하나만 카메라 사용하게 조정)
+            controller.update()  # 필요시 주기적 업데이트
+위의 예시는 개념을 보여준 것으로, 실제 구현에서는 ROS 노드 구조에 따라 다를 수 있습니다. 중요한 점은 메인에서 어떤 구현체를 쓸지 선택하고, 클래스들이 모두 추상 인터페이스에 의존하므로 쉽게 교체가 가능하다는 것입니다. 또한, platform 구현에서는 중복 최소화를 위해 가능하면 ROS/Tiki 모두 공통되는 부분은 상속을 활용할 수 있습니다. 예를 들어 MotorInterface를 직접 ROS/Tiki가 구현하게 해도 되지만, 만약 기본적으로 set_speed의 인자 검증, 범위 클램핑 등의 공통 동작이 있다면 MotorInterface에 기본 구현을 넣고 ROSMotorController와 TikiMotorController에서는 필수 메서드만 오버라이드하도록 설계할 수 있습니다 (파이썬의 ABC 클래스 + @abstractmethod 활용). 마지막으로, 리팩토링된 코드에는 각 클래스와 함수에 docstring과 주석을 충분히 추가하여, 어떤 역할을 하고 있고 어떻게 구현되었는지 설명합니다. 특히 디자인 패턴이나 중요한 의사결정 부분에는 주석으로 의도를 명시하여 (예: “Strategy 패턴 적용: 다양한 LaneDetection 알고리즘 중 현재는 ColorThresholdStrategy 사용”) 이후 개발자가 이해하기 쉽게 합니다.
+6. 리팩토링 예시 코드 및 주석
+마지막으로, 리팩토링된 코드 일부를 예시로 보여드리면 다음과 같습니다. 각 클래스가 얼마나 단순하고 명확해졌는지, 그리고 외부 인터페이스/함수를 활용하는지를 강조합니다:
+# motor_interface.py
+from abc import ABC, abstractmethod
+class MotorInterface(ABC):
+    @abstractmethod
+    def set_speed(self, left: float, right: float):
+        """왼쪽/오른쪽 모터 속도 설정 (범위: -1.0 ~ 1.0 일반화)"""
+        pass
+    @abstractmethod
+    def stop(self):
+        """모터 정지"""
+        pass
+
+# ros_motor_controller.py
+import rospy
+from geometry_msgs.msg import Twist
+class ROSMotorController(MotorInterface):
+    def __init__(self):
+        self.pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
+    def set_speed(self, left: float, right: float):
+        twist = Twist()
+        # differential drive: linear.x = f(speed), angular.z = g(diff)
+        twist.linear.x = (left + right) / 2.0  # 단순 예시: 평균 속도를 직진속도로
+        twist.angular.z = (right - left) / 0.5  # 두 바퀴 차이를 회전으로 (베이스폭 0.5m 가정)
+        self.pub.publish(twist)
+    def stop(self):
+        twist = Twist()
+        twist.linear.x = 0.0
+        twist.angular.z = 0.0
+        self.pub.publish(twist)
+
+# tiki_motor_controller.py
+from tiki.mini import TikiMini
+class TikiMotorController(MotorInterface):
+    def __init__(self):
+        self.tiki = TikiMini()
+        # 모터를 PWM모드로 설정 (필요시)
+        self.tiki.set_motor_mode(self.tiki.MOTOR_MODE_PWM)  # PWM 모드:contentReference[oaicite:12]{index=12}
+    def set_speed(self, left: float, right: float):
+        # 입력 [-1.0, 1.0] 를 Tiki의 PWM 정수값 -127~127로 변환
+        max_pwm = 127
+        pwm_left = int(left * max_pwm)
+        pwm_right = int(right * max_pwm)
+        # Tiki API 호출로 모터 속도 설정
+        self.tiki.set_motor_power(self.tiki.MOTOR_LEFT, pwm_left)
+        self.tiki.set_motor_power(self.tiki.MOTOR_RIGHT, pwm_right)
+    def stop(self):
+        self.tiki.stop()  # Tiki API 정지 호출:contentReference[oaicite:13]{index=13}
+
+# aruco_trigger_capture_yolo.py (부분 발췌)
+class ArucoTrigger:
+    def __init__(self, camera_interface: CameraInterface, controller: Controller,
+                 led_interface: LEDInterface, display_interface: DisplayInterface):
+        self.camera = camera_interface
+        self.controller = controller
+        self.led = led_interface
+        self.display = display_interface
+        self.last_capture_time = 0.0
+    def process_frame(self, frame: np.ndarray):
+        corners, ids = detect_aruco_markers(frame)  # OpenCV ArUco 검출 (별도 함수 가능)
+        if ids is not None and len(ids) > 0:
+            ids_list = [int(i) for i in ids]
+            if is_valid_marker(ids_list, getattr(self, "last_marker_time", 0)):  # 마커 유효성 검사
+                # OLED 디스플레이에 로그 출력
+                current_time = time.strftime("%H:%M:%S")
+                self.display.log(f"[{current_time}] ArUco 마커 감지: {ids_list}")
+                # LED를 파란색으로 점등하여 사용자에게 피드백
+                self.led.set_color('top', 0, (0, 0, 255))  # (장치에 따라 파라미터 조정)
+                # 캡처 조건 확인 후 이미지 저장 및 YOLO 탐지 트리거
+                if should_capture_frame(frame_index=self.controller.frame_count,
+                                         last_capture_index=self.last_capture_time):
+                    img = frame  # 이미 현재 프레임이 있음 (ROS이면 콜백 인자로 받은 것)
+                    save_path = save_image(img, prefix="aruco")  # 이미지 저장
+                    self.last_capture_time = self.controller.frame_count
+                    # TODO: YOLO 탐지 모듈 연계 (예: 별도 쓰레드나 비동기로 탐지 수행)
+                    # self.yolo_detector.detect_async(save_path)
+위 코드 조각에서 볼 수 있듯이, ArucoTrigger는 프레임에서 마커 검출 후 해야 할 일들을 순차적으로 표현하지만, 각 단계의 세부 내용은 detect_aruco_markers, is_valid_marker, should_capture_frame, save_image 등의 외부 함수에 맡기고 있습니다. 또한 display.log, led.set_color 등의 호출로 하드웨어를 제어하지만, 이 역시 인터페이스 뒤에 숨겨져 있어 ROS/Tiki에 따라 각각 다르게 동작합니다. 예를 들어 Tiki에서는 led.set_color 구현이 내부적으로 tiki.set_led를 호출하여 실제 LED를 켜겠지만, ROS에선 만약 해당 LED가 없으면 그냥 로그로 대체하거나 무시하도록 구현될 것입니다. Controller와 LaneDetector도 유사한 방식으로 리팩토링됩니다. Controller는 motor.set_speed를 통해 속도를 제어하고, 필요 시 imu.get_yaw() 등을 호출해 회전 진행 상황을 확인할 수 있습니다. LaneDetector는 frame을 받아 mask = get_lane_mask(frame) -> offset = calc_lane_offset(mask) 등의 유틸리티 호출로 결과를 얻고, 임계치 비교 후 Controller의 메서드를 호출하거나 /cmd_vel 직접 퍼블리시하던 코드를 이제는 Controller API 호출로 대체합니다. 마지막으로, 구조 다이어그램을 간략히 텍스트로 표현하면:
+Main (robot.py) → 필요한 인터페이스 구현체 생성 (ROS or Tiki) → Controller, Detector 등에 주입 → 루프/콜백에서 각 객체 메서드 호출
+ArucoTrigger.process_frame → (유틸: ArUco 검출) → (유틸: 마커 유효성 판단) → DisplayInterface.log + LEDInterface.set_color → (유틸: 캡처조건) → Camera/프레임 활용 이미지 저장 → Controller/YOLO와 상호작용
+LaneDetector.process_frame → Camera로부터 영상 획득 (ROS에선 콜백 인자) → (유틸: 차선 마스크 생성) → (유틸: 차선 오프셋 계산) → (유틸: 포트홀 검사) → Controller에 주행 제어 명령 (controller.steer(left) 혹은 motor.set_speed 직접)
+Controller는 MotorInterface, IMUInterface를 사용하여 받은 명령을 실행하거나, 내부 로직(상태기계)에 따라 주기적으로 motor 명령을 업데이트
+이러한 리팩토링을 거치면, 코드가 플랫폼에 독립적인 계층(core 로직)과 플랫폼 의존적인 계층(interface 구현)으로 나누어져 관리됩니다. 결과적으로 ROS 노드로서도 동작하고 ROS 없이도 동작할 수 있는 유연한 구조가 되며, 각 기능별 코드가 잘 모듈화되어 이해하기 쉽고 수정하기 용이해집니다. 주요 클래스들은 본연의 역할에 집중하여 간결해졌고, 중복되던 코드들은 공통 함수로 합쳐졌으므로 전체 코드베이스의 일관성과 유지보수성이 개선됩니다. 필요한 경우 새로운 센서나 다른 하드웨어로 교체도 인터페이스 구현만 추가하면 되므로 확장성도 높아집니다.
+
+
+출처
+나의 말:
+업로드한 이미지
+cursor에 너의 답변을 붙여 넣으면 돼? 그리고 모델이 이렇게 밖에 없어
+ChatGPT의 말:
+좋아, Cursor에서 사용할 수 있도록 정리된 프롬프트는 위에 다 준비해놨어. 지금 보이는 모델 목록에서는 GPT-5.1 Codex 또는 GPT-5.1 Codex Mini를 선택하는 게 리팩토링 작업에 가장 적합해.
+
+Composer 1은 성능이 떨어질 수 있고, Sonnet/Gemini 계열은 구조적 파악보다는 문장 요약이나 QA에 더 특화되어 있어. 가능하다면 GPT-5.1 Codex를 기본으로, 리소스가 부족할 땐 Codex Mini를 써.
+
+Cursor에선 내 프롬프트를 그대로 붙여넣고 실행하면 되고, 만약 토큰 제한에 걸리면 interface, ArucoTrigger, Controller 정도씩 나눠서 붙여넣어도 괜찮아.
+
+추가 설계나 리팩토링 피드백이 필요하면 언제든 도와줄게!
+
+
+음성 파일 검색
+
+2
+출처
+
+
+
+선택된 파일 없음선택된 파일 없음
+ChatGPT는 실수를 할 수 있습니다. 중요한 정보는 재차 확인하세요.
+
+maicon_preparation 레포지토리 구조 리팩토링
+ChatGPT
+패턴과 디렉토리 구조를 수정하고, 다양한 환경을 처리하는 코드 골격을 작성하고 있어요.
+
+Searched for Tiki robotics platform ROS
+ChatGPT
+"Tiki"가 사용자 맞춤 환경일 가능성을 보고, 저장소 내 "tiki" 참조를 확인하고 있어.
+
+
+robots.ros.org 읽음
+
+ChatGPT
+"Tiki 로봇"을 찾고 있어요.
+
+Searched for Tiki robot platform
+ChatGPT
+Tiki에 대한 다양한 가능성을 탐구하고 있어. RTC의 제어 컴퓨터 또는 시스템일 수도 있지만, 더 구체적인 정보를 알려주면 추가로 설명할 수 있어.
+
+Searched for ROS Python interface abstraction
+ChatGPT
+코드에서 디자인 패턴의 개념을 어떻게 설명할 수 있을지 생각하고 있어요. 전략 패턴을 사용해 다양한 전략을 선택하는 방법을 보여줄게요.
+
+
+codesignal.com 읽음
+
+ChatGPT
+코드는 설명용으로 사용되고 있어요. 인용은 필요 없지만 지식 검증을 위해 레포지토리를 살펴볼 필요가 있네요.
+
+Searched for Tiki maicon
+ChatGPT
+기록을 조사하는 중, 여기에 "Tiki" 관련 내용이 없네. GitHub 링크를 열어보는 게 좋을 것 같아.
+
+Searched for maicon_preparation ROS
+ChatGPT
+어떤 코드 파일이 업로드되었는지 살펴보고 있는 중입니다.
+
+사용자가 제공한 지침을 따라 디자인 문서를 재구성하고 있어. 코드 스텁, 클래스 예제 등을 포함하여 각 섹션을 엮고 있네.
+
+Searched for tjdans6342 maicon_preparation github
+ChatGPT
+GitHub 콘텐츠 추가하거나 공개 저장소를 직접 검색하는 방법을 찾고 있어.
+
+Searched for maicon_preparation ROS
+ChatGPT
+레포지토리 링크를 "browser.open"으로 열어보는 중입니다.
+
+search 명령으로 접근하고 있어. lokal 파일을 열지 않고, 절대 경로로 직접 열 수 있는지 살펴보고 있어.
+
+"tjdans6342 maicon_preparation main robot.py" 명령을 사용하여 소스 코드 검색을 시도하고 있어. 음성 파일을 찾을 수 있을까?
+
+Searched for tjdans6342 maicon_preparation robot.py
+검색 중…
+
+중지하기
+
+업데이트
+
+1. I/O 인터페이스 추상화 (클래스 기반)
+ROS와 Tiki 환경의 하드웨어 제어 방식을 통합하기 위해 추상 클래스 기반의 I/O 인터페이스를 도입합니다. 각 하드웨어 기능별로 인터페이스를 정의하고, ROS용과 Tiki용으로 각각 구현합니다. 예를 들어:
+모터 제어: MotorInterface 추상 클래스를 정의하고, set_speed(left, right)와 stop() 등의 메서드를 선언합니다.
+ROSMotorController: MotorInterface를 구현하여 ROS에서는 rospy.Publisher 등을 통해 /cmd_vel 토픽에 Twist 메시지를 발행하는 방식으로 모터 속도를 제어합니다 (예: set_speed에서 Twist.linear.x와 Twist.angular.z 설정 후 publish).
+TikiMotorController: MotorInterface를 구현하여 Tiki 라이브러리의 API 호출로 모터를 제어합니다. 예를 들어 set_speed(left, right)에서 Tiki의 set_motor_power 또는 고수준 동작 함수를 호출하고, stop()에서는 tiki.stop()을 호출합니다. Tiki API는 -127~127 범위의 PWM 값을 사용하므로, set_speed에서 입력 속도를 해당 범위로 변환해 전달합니다. Tiki에서는 tiki.set_motor_power(…)나 전/후진 등의 편의 메서드(forward, backward 등)를 제공합니다. 이러한 세부사항은 TikiMotorController 내부에 숨겨집니다.
+카메라 제어: CameraInterface를 정의하여 카메라 이미지 캡처 기능을 추상화합니다.
+ROSCamera: ROS에서는 sensor_msgs/Image 토픽을 구독하고 콜백으로 이미지를 받아 OpenCV 형식으로 변환하거나, 혹은 OpenCV VideoCapture를 사용해 Jetson 카메라 파이프라인을 직접 열 수도 있습니다.
+TikiCamera: Tiki 환경에서는 별도의 카메라 API가 없다면 OpenCV의 GStreamer 파이프라인으로 직접 카메라를 엽니다 (예: cv2.VideoCapture로 Jetson Nano 카메라를 열고 프레임을 읽음). CameraInterface.capture() 메서드는 내부적으로 환경별 방식으로 한 프레임을 얻어 반환하도록 구현합니다.
+OLED 디스플레이 (로그 출력): DisplayInterface를 정의하여 텍스트 로그 출력을 추상화합니다.
+ROSDisplay: ROS에서는 OLED가 없으므로 대체로 rospy.loginfo나 터미널 출력으로 대체할 수 있습니다. ROSDisplay.log(msg)는 콘솔에 출력하고, log_clear()는 ROS에는 의미 없으므로 화면출력 지우기 기능을 생략하거나 최근 로그를 지우는 형태로 흉내냅니다.
+TikiDisplay: Tiki 라이브러리의 tiki.log("...")와 tiki.log_clear()를 호출하여 OLED에 메시지를 표시/초기화합니다. 예를 들어 DisplayInterface.log(msg) 구현에서 tiki.log(msg)를 호출하게 합니다.
+LED 제어: LEDInterface를 정의하여 로봇의 LED 스트립/라이트 제어를 추상화합니다.
+ROSLedController: ROS 환경에서 해당 LED가 존재한다면 ROS 토픽/서비스로 제어하거나, 없을 경우 Dummy 구현으로 넘어갑니다. 예를 들어 LED가 없으면 함수 호출시 로그만 남기는 방식으로 구현합니다.
+TikiLedController: Tiki의 set_led(direction, index, R, G, B) API를 사용합니다. 예를 들어 LEDInterface.set_color(position, color) 등을 정의해 Tiki에서는 해당 위치의 LED 색상을 설정하고, ROS에선 지원되지 않으면 무시하도록 합니다. 여러 LED를 일괄 제어할 경우 루프로 tiki.set_led를 호출하는데, 이런 구현은 Tiki 전용 클래스 내부에 캡슐화합니다.
+IMU 센서: IMUInterface를 정의하여 가속도/자이로 등의 IMU 값을 얻는 메서드를 명시합니다 (예: get_acceleration(), get_gyro()).
+ROSImu: ROS에서는 /imu/data와 같은 토픽을 구독하거나 필요한 경우 sensor_msgs/Imu 메시지를 이용합니다. 최신 값을 유지하다가 get_acceleration() 호출시 최근 값을 반환하거나 블로킹 대기 후 반환하도록 구현합니다.
+TikiImu: Tiki의 IMU 인터페이스 tiki.get_imu()를 호출하여 [ax, ay, az] 값을 얻습니다. 필요에 따라 보정이나 단위 변환을 수행합니다. 자이로값이 필요하면 Tiki API에 해당 함수가 있을 경우 호출하고, 없으면 IMU는 가속도만 지원한다고 간주합니다.
+이러한 추상 인터페이스들을 한 곳에 모아 interface/ 디렉토리나 platform/ 디렉토리로 분리합니다. 예를 들어 interface/motor_interface.py에 MotorInterface를, platform/tiki/motor_controller.py에 TikiMotorController, platform/ros/motor_controller.py에 ROSMotorController를 구현하는 식입니다. 이를 통해 메인 코드에서는 구체적인 하드웨어 API를 알 필요 없이, MotorInterface 타입으로 모터를 제어할 수 있습니다.
+Adapter 패턴 적용: 이러한 구조는 GoF의 Adapter(어댑터) 패턴과 유사합니다. 한쪽에는 프로그램의 표준 인터페이스(MotorInterface 등)가 있고, 어댑터 클래스(TikiMotorController/ROSMotorController)가 실제 서비스 클래스(Tiki API 혹은 ROS 기능)를 감싸 호환시켜줍니다. 어댑터는 내부에서 서로 다른 인터페이스의 호출을 변환하여, 클라이언트 코드(우리의 메인 로직)가 변경 없이도 서로 다른 환경에서 동작하도록 합니다
+refactoring.guru
+. 결과적으로 ROS ↔ Tiki 간 I/O 제어 방식 차이를 객체 지향적으로 흉내내어, 코드 중복 없이 두 환경을 모두 지원할 수 있게 됩니다.
+2. 기능 함수 분리 (모듈화)
+기존 코드에서 한 클래스가 너무 많은 세부 로직을 담고 있었다면, 이를 독립적인 유틸리티 함수들로 분리하여 모듈화합니다. 이렇게 하면 코드 재사용성과 테스트 용이성이 크게 높아집니다. 아래와 같은 보조 기능들을 별도 함수로 분리할 수 있습니다:
+포트홀(pothole) 감지 함수 – 예: check_binary_image_pothole(bin_img: np.ndarray) -> bool
+흑백 이진화된 영상에서 포트홀(도로 함몰이나 구멍)을 감지하는 로직을 함수로 분리합니다. 구현 방식으로, 예를 들어 영상에서 특정 크기 이상의 검은 영역을 찾거나 컨투어 분석을 통해 포트홀로 의심되는 패턴이 있는지 판단할 수 있습니다. 이 함수는 이진 영상 bin_img를 입력 받아 포트홀이 존재하면 True/없으면 False를 리턴합니다. 이렇게 분리하면 LaneDetector 등의 클래스에서 이미지마다 이 함수를 호출해 결과만 받아 쓰면 되므로, 클래스 코드가 깔끔해집니다. 또한 단위 테스트 시에도 다양한 샘플 영상으로 이 함수를 개별적으로 검증할 수 있습니다.
+마커 유효성 판단 함수 – 예: is_valid_marker(ids: list[int]) -> bool 또는 filter_marker_ids(ids: list[int]) -> list[int]
+ArUco 마커 인식 결과로 얻은 ID 목록에서 유효한 마커인지 판정하는 로직을 함수로 분리합니다. 예를 들어 대회에서 특정 ID의 ArUco만 트리거로 사용한다면, 감지된 ID가 그 목록에 포함되는지 확인합니다. 또는 동일 마커의 중복 감지를 방지하기 위해 일정 시간 내 이미 처리한 마커 ID는 무시한다든지, 거리/각도 기준으로 오탐 여부를 걸러내는 등의 로직도 이 함수에서 수행할 수 있습니다.
+def is_valid_marker(detected_ids: list[int], last_detect_time: float) -> bool:
+    """감지된 ArUco ID가 유효하며, 연속 중복이 아닌지 검사"""
+    # 예시 구현: 특정 ID(예: 5번)를 찾으며, 최근 5초 내 이미 감지했다면 무효
+    target_id = 5
+    if target_id in detected_ids:
+        if time.time() - last_detect_time > 5:
+            return True
+    return False
+위와 같은 함수는 ArucoTrigger 클래스에서 마커를 감지할 때 호출되고, 반환값에 따라 이후 동작(예: 이미지 캡처 실행 여부)을 결정하게 됩니다.
+이미지 저장 함수 – 예: save_image(img: np.ndarray, prefix: str = "") -> str
+로봇이 특정 이벤트(포트홀 감지, 마커 감지 등) 발생 시 이미지를 파일로 저장해야 한다면, 그 로직을 공통 함수로 분리합니다. 파일 경로 생성(prefix나 타임스탬프 기반 파일명), 디렉토리 존재여부 확인 및 생성, OpenCV를 통한 저장(cv2.imwrite) 등의 처리를 캡슐화합니다. 이렇게 하면 여러 클래스(ArucoTrigger, LaneDetector 등)에서 중복 코드를 피하고 일관된 방법으로 이미지를 저장할 수 있습니다.
+회전 시간 계산 함수 – 예: compute_turn_duration(angle_deg: float, speed: float) -> float
+로봇이 특정 각도로 회전해야 할 때 모터를 얼마나 오래 구동해야 하는지 계산하는 로직을 함수화합니다. 예를 들어 각속도나 실험적 캘리브레이션 값을 이용해 angle_deg (회전할 각도)와 현재 회전 속도(speed)를 넣으면 필요한 시간(초)을 반환하도록 합니다. Controller 클래스는 이 함수를 호출하여 회전 동작을 시간 지연 기반으로 수행할 수 있습니다. (향상된 방법으로 IMU의 자이로 데이터를 이용해 목표각까지 회전하는 루프를 짤 수도 있지만, 일단 기존 코드 로직이 시간 기반이라면 그 부분만 분리합니다.)
+캡처 조건 체크 함수 – 예: should_capture(current_frame: int, last_capture_frame: int, condition: Any) -> bool
+영상이나 센서 데이터 흐름 중 특정 조건에서만 캡처/처리를 하도록 한다면, 그 판단을 하는 함수를 분리합니다. 예를 들어 ArucoTrigger에서 연속된 프레임 중 한 번만 캡처하도록 last_capture_frame과 current_frame을 비교하거나, LaneDetector에서 차선이 잘 인식되지 않으면 현재 프레임을 저장한다든지 하는 결정을 이 함수로 캡슐화할 수 있습니다.
+def should_capture_frame(frame_index: int, last_capture_index: int, interval: int = 30) -> bool:
+    """이전 캡처 이후 일정 프레임 간격이 지났으면 True 반환"""
+    return (frame_index - last_capture_index) >= interval
+이런 함수가 있으면, 매 프레임 처리 시 일일이 조건식을 쓰는 대신 if should_capture_frame(i, last_saved_i): save_image(frame)처럼 명확하게 작성할 수 있습니다.
+위의 예시들처럼 모든 복잡한 로직을 개별 함수로 쪼개면, 주 클래스 코드가 훨씬 간결해집니다. 각 함수는 utils/ 패키지나 관련 모듈(detection_utils.py, control_utils.py 등)에 모아두면 좋습니다. 특히 단위 테스트 작성 시 이러한 함수들은 하드웨어 없이도 입력→출력 검증을 할 수 있어 품질 향상에 도움이 됩니다.
+3. 핵심 클래스 단순화 및 역할 분리
+상기한 인터페이스와 유틸 함수들을 도입한 후에는, 기존의 핵심 클래스들의 내부 구현을 과감히 정리합니다. ArucoTrigger, Controller, LaneDetector 등 주요 클래스는 본연의 역할(상태 관리, ROS 메시지 송수신, 이벤트 트리거링)에 집중하고, 세부 처리는 외부로 위임하도록 리팩토링합니다:
+ArucoTrigger 클래스:
+이 클래스는 ArUco 마커를 감지하여 특정 이벤트(예: 이미지 캡처나 경로 변경)를 트리거하는 역할입니다. 리팩토링 후 ArucoTrigger는 다음과 같은 구조를 가질 것입니다:
+상태: 최근 감지된 마커 ID나 시간 (last_marker_id, last_marker_time 등), 최근 캡처 시점 (last_capture_time 또는 프레임 번호) 등을 멤버로 유지합니다.
+I/O 의존성: 생성자에서 CameraInterface, LEDInterface, DisplayInterface 등을 주입받습니다. 이를 통해 카메라 접근이나 표시 장치를 직접 다루지 않고 인터페이스로 처리합니다. (예: self.camera.capture()로 프레임 획득, self.display.log("...")로 OLED에 로그 출력 등)
+동작: ROS 환경이라면 이 클래스 자체가 ROS 노드로서 /camera/image 토픽 콜백에서 프레임을 받고 처리할 수도 있고, Tiki 환경이라면 루프로 capture()를 호출해 주기적으로 프레임을 확인할 것입니다.
+로직: 프레임 처리 시 ArUco 검출은 OpenCV로 수행하고 (cv2.aruco.detectMarkers), 결과 ID 목록을 얻으면 유효성 판단 함수 (is_valid_marker)를 호출해 사용할 마커인지 확인합니다. 유효한 마커라면 캡처 조건 함수 (should_capture_frame 등)로 지금 이미지를 저장할지 결정하고, True일 경우 CameraInterface를 통해 이미지를 얻거나 이미 받아온 프레임을 이미지 저장 함수 (save_image)로 저장합니다. 또한 필요한 경우 LEDInterface로 LED를 깜빡이거나 (self.led.set_color() 등), DisplayInterface.log()로 OLED에 상태를 출력하는 등 부가 반응을 실행합니다.
+책임 제한: ArucoTrigger는 “어떤 조건에서 무엇을 할지” 결정만 하고, **“그것을 어떻게 할지”**는 모두 외부 모듈에 맡깁니다. 예를 들어 이미지를 어떻게 저장하는지는 모르고 save_image 유틸함수를 호출할 뿐이고, 하드웨어 제어는 interface 객체들에 위임합니다.
+Controller 클래스 (주행 제어):
+Controller는 차량의 주행 상태를 관리하고, 필요에 따라 속도를 조정하거나 회전 등의 동작 명령을 내리는 클래스입니다. 리팩토링 후 Controller의 개선 사항:
+상태: 현재 주행 모드 (mode – 직진, 회전, 정지 등), 목표 속도, 차선 오차 누적 등 제어에 필요한 상태만 유지합니다.
+I/O 의존성: MotorInterface와 IMUInterface를 주입받습니다. 이를 통해 모터 제어를 추상화합니다. 예를 들어 self.motor.set_speed(v_left, v_right)를 호출하면 ROS 환경에서는 Twist 메시지가 발행되고, Tiki 환경에서는 tiki.set_motor_power가 내부적으로 호출됩니다.
+동작: Controller는 아마도 LaneDetector나 ArucoTrigger로부터 신호를 받아 모드를 전환하거나 속도를 결정할 것입니다. 예를 들어 ArUco 마커를 통해 “정지” 명령을 받으면 self.motor.stop()을 호출하고, 포트홀이 감지되면 우회 회피를 위해 일정 각도로 회전 명령을 내릴 수 있습니다.
+로직: 세부 계산은 유틸 함수로 위임합니다. 예를 들어 회피를 위해 좌회전 90도를 해야 한다면, compute_turn_duration(90, current_speed)를 호출해 필요한 회전 시간을 얻고, 그 기간 동안 self.motor.set_speed(*turning_speed*)하고 time.sleep(duration) 후 self.motor.stop()하는 식의 고수준 로직만 가집니다. IMU가 활용된다면, 일정 각속도에서의 각도적분 대신 IMU의 yaw 값을 읽어 목표 각도에 도달했는지 확인하는 루프로 대체할 수도 있습니다 (추가 개선 사항). 핵심은 Controller 자체는 “언제 멈추고 언제 돌지” 결정에 집중하고, **“구체적으로 모터를 어떻게 회전시키고 시간을 잴지”**는 MotorInterface와 유틸 함수가 담당하도록 역할을 분리하는 것입니다.
+LaneDetector 클래스 (차선 인식):
+LaneDetector는 카메라 영상을 받아 차선을 감지하고, 주행 경로 수정이나 속도 조절 신호를 Controller에 전달합니다. 리팩토링 방안:
+상태: 최근 감지된 차선 중심 오프셋, 곡률, 포트홀 감지 여부 등을 상태로 가질 수 있습니다.
+I/O 의존성: CameraInterface를 통해 영상을 받거나, ROS에서는 /camera/image 콜백 내부에서 바로 OpenCV 처리를 할 수도 있습니다. (만약 ArucoTrigger와 LaneDetector가 모두 카메라를 쓴다면 한 노드에서 처리하거나, 별도로 카메라 노드 -> 두 detection 노드로 토픽을 분배할 수도 있지만, 여기선 구조 논의에 집중합니다.)
+로직: 이미지 처리 세부 단계 (예: 컬러 필터링, 에지 검출, 허프 변환 등)는 전부 유틸 함수로 분리합니다. 예를 들어 get_lane_mask(frame) -> np.ndarray, detect_lane_curve(mask) -> float (차선 곡률 또는 방향), detect_offset(mask) -> float (차선 중앙으로부터의 편차) 등의 함수를 utils/lane_utils.py 등에 구현합니다. LaneDetector 클래스는 매 프레임마다 이러한 함수를 호출해 결과만 얻고, 이를 기반으로 간단한 판단만 합니다. 예를 들어 차선 중앙 오프셋이 일정 임계치 이상이면 Controller에 “좌측으로 조향 필요” 신호를 보낸다거나, 차선이 안 보이면 정지 명령을 내리는 식의 결정 로직입니다.
+포트홀 감지: 만약 차선 영상에서 포트홀(도로 파손)을 감지하는 것도 이 클래스 책임이라면, 앞서 분리한 check_binary_image_pothole 함수를 활용합니다. 예를 들어 이진 차선 마스크를 얻은 후 추가로 바닥 영역을 검색하여 포트홀이 있다고 판단되면 Controller에 “포트홀 회피” 동작을 요청합니다. 이런 판단도 if check_binary_image_pothole(bin_img): controller.avoid_pothole()와 같이 한 줄로 표현되고, 세부 구현은 함수 내부에 감춰집니다.
+통신: LaneDetector는 ROS라면 /lane_info 같은 커스텀 메시지를 퍼블리시하거나, Controller 인스턴스를 직접 참조할 수도 있습니다. 구조상 MVC로 엄격히 하려면 Publisher/Subscriber로 decouple하는 게 좋지만, 코드 규모가 작다면 Controller 객체를 생성자 인자로 받아 self.controller.turn_left()처럼 직접 호출해도 됩니다. (이점: ROS 없이도 동작 가능하므로 시뮬레이션/테스트에 유리)
+이러한 클래스 구조 단순화를 통해 클래스 당 책임이 명확해집니다. 각 클래스는 “어떤 이벤트가 발생하면 무엇을 할지”만 결정하고, 실제 작업은 인터페이스나 유틸리티로 빠지기 때문에 코드 길이가 줄고 이해하기 쉬워집니다. 또한 ROS 환경과 Tiki 환경 모두에서 동작해야 하므로, ROS 노드는 가급적 **입출력 부분(토픽 수신/발행)**에만 한정하고, 로직은 공용 함수/클래스를 쓰도록 하면 동일한 코드가 Tiki (혹은 오프라인 모드)에서도 재사용됩니다.
+4. 유연성을 위한 디자인 패턴 적용
+설계 시 디자인 패턴을 활용하면 코드 구조를 더욱 견고하고 유연하게 만들 수 있습니다. 이번 리팩토링에서는 앞서 언급한 Adapter 패턴과 더불어 Strategy 패턴 등을 고려합니다:
+Adapter 패턴 (어댑터) – 앞서 I/O 인터페이스 추상화에서 구현한 방식 자체가 어댑터 패턴의 활용입니다. 서로 다른 인터페이스(ROS API vs Tiki API)를 통일된 형식으로 맞춰주는 클래스들을 두어, 런타임에 환경만 바꿔 끼우면 (MotorInterface 하나 쓰는 코드가 ROS에서든 Tiki에서든 동일하게 동작) 프로그램 전반을 수정하지 않고도 플랫폼 전환이 가능합니다
+refactoring.guru
+. 이 패턴은 새로운 하드웨어가 추가되더라도(예: 다른 타입의 로봇 제어 라이브러리) MotorInterface만 구현하면 나머지 코드 수정을 최소화할 수 있다는 이점이 있습니다.
+Strategy 패턴 – 전략 패턴은 행위 알고리즘을 캡슐화하여 교체 가능하게 만드는 패턴입니다. 이번 맥락에서 두 가지 활용 방향이 있습니다:
+환경 선택 전략: 예를 들어 프로그램 시작 시 ROS 모드인지 Tiki 모드인지에 따라 다른 전략의 I/O 바인딩을 설정하는 것을 말합니다. 구체적으로는 RobotController 초기화시 MotorInterface 파라미터로 ROS용 또는 Tiki용 구현체를 주입하는 것이 하나의 전략 선택입니다. 이 부분은 엄밀히 말하면 DI(Dependency Injection)에 가깝지만, 내부적으로 “전략”을 바꿨다고 볼 수도 있습니다. 실행 중에 바뀌지는 않겠지만, 코드 구조상 if/else 분기 없이 전략 주입으로 처리한다는 점이 깔끔합니다.
+동작 알고리즘 교체: 주행 제어 로직이나 감지 로직에 복수의 방법이 있을 때 전략 패턴을 쓸 수 있습니다. 예를 들어 LaneDetector에서 **“차선 인식 방법”**을 여러 가지 알고리즘으로 바꿔쓸 수 있도록 할 수 있습니다. 간단한 색상 기반 검출 vs. 딥러닝 모델 사용 등으로 LaneDetectionStrategy 인터페이스를 만들고 다양한 구현체를 넣을 수 있습니다. 이 대회 코드에 그런 복잡한 전략까지는 요구되지 않을 수도 있지만, 향후 확장성을 생각하면 구조를 그렇게 짜두면 좋습니다.
+또 다른 예로, Controller의 주행 제어 정책도 전략화할 수 있습니다. 예컨대 평상시에는 “차선을 따라 직진” 전략을 쓰다가, ArUco 마커가 나오면 “특정 행동 수행” 전략으로 일시 교체하는 식입니다. 구현상 상태 머신으로 짤 수도 있지만, 전략 패턴으로 각 상태의 행동을 분리하면 교체가 용이해집니다.
+기타 패턴 – 만약 코드 구조 변경이 크다면, Facade 패턴이나 Observer(Listener) 패턴도 고려됩니다. 예를 들어 ArucoTrigger, LaneDetector 등이 Controller에 이벤트를 통지하는 데 Observer 패턴을 쓰면 느슨한 결합으로 만들 수 있습니다. 혹은 Robot 메인 클래스가 여러 하위 모듈을 관리하는 파사드(Facade) 역할을 하도록 해도 됩니다. 하지만 우선은 Adapter와 Strategy 적용만으로도 요구사항은 달성하리라 보입니다.
+디자인 패턴을 적용할 때는 과도한 복잡도 증가를 경계해야 합니다. 여기서는 유지보수성과 확장성을 높이기 위한 선에서 적절히 적용하고, 코드에 주석을 통해 어떤 패턴을 썼고 어떻게 동작하는지 설명을 덧붙이는 것도 요구사항에 포함됩니다. 예를 들어 TikiMotorController 클래스 정의 위에 “# Adapter: MotorInterface -> Tiki library” 같은 주석을 남겨 개발자들이 의도를 쉽게 파악하도록 합니다.
+5. 리팩토링 후 구조 및 구현 제안
+요구사항에 따라 파일 및 클래스 구조를 정비하면 프로젝트의 디렉토리 구성은 다음처럼 바뀔 수 있습니다:
+maicon_preparation/
+├── interface/  # 추상 I/O 인터페이스 정의
+│   ├── motor_interface.py        # class MotorInterface (abstract base class)
+│   ├── camera_interface.py       # class CameraInterface
+│   ├── display_interface.py      # class DisplayInterface (OLED/Logging)
+│   ├── led_interface.py          # class LEDInterface
+│   └── imu_interface.py          # class IMUInterface
+├── platform/
+│   ├── ros/
+│   │   ├── ros_motor_controller.py    # class ROSMotorController(MotorInterface)
+│   │   ├── ros_camera.py              # class ROSCamera(CameraInterface)
+│   │   ├── ros_display.py             # class ROSDisplay(DisplayInterface)
+│   │   ├── ros_led.py                 # class ROSLedController(LEDInterface)
+│   │   └── ros_imu.py                 # class ROSImu(IMUInterface)
+│   └── tiki/
+│       ├── tiki_motor_controller.py   # class TikiMotorController(MotorInterface)
+│       ├── tiki_camera.py             # class TikiCamera(CameraInterface)
+│       ├── tiki_display.py            # class TikiDisplay(DisplayInterface)
+│       ├── tiki_led.py                # class TikiLedController(LEDInterface)
+│       └── tiki_imu.py                # class TikiImu(IMUInterface)
+├── src/
+│   ├── core/
+│   │   ├── control/
+│   │   │   └── controller.py          # class Controller (refactored to use interfaces)
+│   │   ├── detection/
+│   │   │   ├── aruco_trigger_capture_yolo.py  # class ArucoTrigger (refactored)
+│   │   │   └── lane_detector.py       # class LaneDetector (refactored)
+│   │   └── detection_utils.py        # (optional) helper functions or classes for detection
+│   └── utils/
+│       ├── image_utils.py            # e.g. save_image, etc.
+│       ├── marker_utils.py           # e.g. is_valid_marker, etc.
+│       ├── motion_utils.py           # e.g. compute_turn_duration, etc.
+│       └── __init__.py
+├── main/
+│   └── robot.py        # 메인 실행 스크립트: 전체 초기화 및 루프/ROS 노드 스핀
+└── (기타 파일들)
+위 구조에서 핵심은 interface/와 platform/ 폴더로 ROS/Tiki별 구현을 깔끔히 분리한 점입니다. main/robot.py (혹은 main.launch.py)에서는 실행 환경에 따라 적절한 구현체를 주입하여 core 클래스를 초기화합니다. 예를 들어, ROS로 실행하면:
+# robot.py (일부 발췌)
+from interface.motor_interface import MotorInterface
+from platform.ros.ros_motor_controller import ROSMotorController
+from platform.ros.ros_camera import ROSCamera
+# ... (필요한 인터페이스 불러오기)
+
+if __name__ == "__main__":
+    # 환경 설정, 예: 인자나 환경변수로 "ROS" 또는 "TIKI" 판별
+    env = os.getenv("ROBOT_ENV", "ROS")
+    if env == "ROS":
+        motor = ROSMotorController()
+        camera = ROSCamera()
+        display = ROSDisplay()
+        led = ROSLedController()
+        imu = ROSImu()
+    else:  # "TIKI"
+        motor = TikiMotorController()
+        camera = TikiCamera()
+        display = TikiDisplay()
+        led = TikiLedController()
+        imu = TikiImu()
+
+    controller = Controller(motor_interface=motor, imu_interface=imu)
+    lane_detector = LaneDetector(camera_interface=camera, controller=controller)
+    aruco_trigger = ArucoTrigger(camera_interface=camera, controller=controller, 
+                                 led_interface=led, display_interface=display)
+    # ROS 환경이면 rospy.spin() 등, Tiki이면 수동 루프 실행
+    if env == "ROS":
+        rospy.init_node('robot_main')
+        ...
+        rospy.spin()
+    else:
+        # Tiki 환경: 수동으로 주기적 작업 실행
+        while True:
+            frame = camera.capture()
+            lane_detector.process_frame(frame)    # LaneDetector에 수동으로 프레임 공급
+            aruco_trigger.process_frame(frame)   # (혹은 두 클래스 중 하나만 카메라 사용하게 조정)
+            controller.update()  # 필요시 주기적 업데이트
+위의 예시는 개념을 보여준 것으로, 실제 구현에서는 ROS 노드 구조에 따라 다를 수 있습니다. 중요한 점은 메인에서 어떤 구현체를 쓸지 선택하고, 클래스들이 모두 추상 인터페이스에 의존하므로 쉽게 교체가 가능하다는 것입니다. 또한, platform 구현에서는 중복 최소화를 위해 가능하면 ROS/Tiki 모두 공통되는 부분은 상속을 활용할 수 있습니다. 예를 들어 MotorInterface를 직접 ROS/Tiki가 구현하게 해도 되지만, 만약 기본적으로 set_speed의 인자 검증, 범위 클램핑 등의 공통 동작이 있다면 MotorInterface에 기본 구현을 넣고 ROSMotorController와 TikiMotorController에서는 필수 메서드만 오버라이드하도록 설계할 수 있습니다 (파이썬의 ABC 클래스 + @abstractmethod 활용). 마지막으로, 리팩토링된 코드에는 각 클래스와 함수에 docstring과 주석을 충분히 추가하여, 어떤 역할을 하고 있고 어떻게 구현되었는지 설명합니다. 특히 디자인 패턴이나 중요한 의사결정 부분에는 주석으로 의도를 명시하여 (예: “Strategy 패턴 적용: 다양한 LaneDetection 알고리즘 중 현재는 ColorThresholdStrategy 사용”) 이후 개발자가 이해하기 쉽게 합니다.
+6. 리팩토링 예시 코드 및 주석
+마지막으로, 리팩토링된 코드 일부를 예시로 보여드리면 다음과 같습니다. 각 클래스가 얼마나 단순하고 명확해졌는지, 그리고 외부 인터페이스/함수를 활용하는지를 강조합니다:
+# motor_interface.py
+from abc import ABC, abstractmethod
+class MotorInterface(ABC):
+    @abstractmethod
+    def set_speed(self, left: float, right: float):
+        """왼쪽/오른쪽 모터 속도 설정 (범위: -1.0 ~ 1.0 일반화)"""
+        pass
+    @abstractmethod
+    def stop(self):
+        """모터 정지"""
+        pass
+
+# ros_motor_controller.py
+import rospy
+from geometry_msgs.msg import Twist
+class ROSMotorController(MotorInterface):
+    def __init__(self):
+        self.pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
+    def set_speed(self, left: float, right: float):
+        twist = Twist()
+        # differential drive: linear.x = f(speed), angular.z = g(diff)
+        twist.linear.x = (left + right) / 2.0  # 단순 예시: 평균 속도를 직진속도로
+        twist.angular.z = (right - left) / 0.5  # 두 바퀴 차이를 회전으로 (베이스폭 0.5m 가정)
+        self.pub.publish(twist)
+    def stop(self):
+        twist = Twist()
+        twist.linear.x = 0.0
+        twist.angular.z = 0.0
+        self.pub.publish(twist)
+
+# tiki_motor_controller.py
+from tiki.mini import TikiMini
+class TikiMotorController(MotorInterface):
+    def __init__(self):
+        self.tiki = TikiMini()
+        # 모터를 PWM모드로 설정 (필요시)
+        self.tiki.set_motor_mode(self.tiki.MOTOR_MODE_PWM)  # PWM 모드:contentReference[oaicite:12]{index=12}
+    def set_speed(self, left: float, right: float):
+        # 입력 [-1.0, 1.0] 를 Tiki의 PWM 정수값 -127~127로 변환
+        max_pwm = 127
+        pwm_left = int(left * max_pwm)
+        pwm_right = int(right * max_pwm)
+        # Tiki API 호출로 모터 속도 설정
+        self.tiki.set_motor_power(self.tiki.MOTOR_LEFT, pwm_left)
+        self.tiki.set_motor_power(self.tiki.MOTOR_RIGHT, pwm_right)
+    def stop(self):
+        self.tiki.stop()  # Tiki API 정지 호출:contentReference[oaicite:13]{index=13}
+
+# aruco_trigger_capture_yolo.py (부분 발췌)
+class ArucoTrigger:
+    def __init__(self, camera_interface: CameraInterface, controller: Controller,
+                 led_interface: LEDInterface, display_interface: DisplayInterface):
+        self.camera = camera_interface
+        self.controller = controller
+        self.led = led_interface
+        self.display = display_interface
+        self.last_capture_time = 0.0
+    def process_frame(self, frame: np.ndarray):
+        corners, ids = detect_aruco_markers(frame)  # OpenCV ArUco 검출 (별도 함수 가능)
+        if ids is not None and len(ids) > 0:
+            ids_list = [int(i) for i in ids]
+            if is_valid_marker(ids_list, getattr(self, "last_marker_time", 0)):  # 마커 유효성 검사
+                # OLED 디스플레이에 로그 출력
+                current_time = time.strftime("%H:%M:%S")
+                self.display.log(f"[{current_time}] ArUco 마커 감지: {ids_list}")
+                # LED를 파란색으로 점등하여 사용자에게 피드백
+                self.led.set_color('top', 0, (0, 0, 255))  # (장치에 따라 파라미터 조정)
+                # 캡처 조건 확인 후 이미지 저장 및 YOLO 탐지 트리거
+                if should_capture_frame(frame_index=self.controller.frame_count,
+                                         last_capture_index=self.last_capture_time):
+                    img = frame  # 이미 현재 프레임이 있음 (ROS이면 콜백 인자로 받은 것)
+                    save_path = save_image(img, prefix="aruco")  # 이미지 저장
+                    self.last_capture_time = self.controller.frame_count
+                    # TODO: YOLO 탐지 모듈 연계 (예: 별도 쓰레드나 비동기로 탐지 수행)
+                    # self.yolo_detector.detect_async(save_path)
+위 코드 조각에서 볼 수 있듯이, ArucoTrigger는 프레임에서 마커 검출 후 해야 할 일들을 순차적으로 표현하지만, 각 단계의 세부 내용은 detect_aruco_markers, is_valid_marker, should_capture_frame, save_image 등의 외부 함수에 맡기고 있습니다. 또한 display.log, led.set_color 등의 호출로 하드웨어를 제어하지만, 이 역시 인터페이스 뒤에 숨겨져 있어 ROS/Tiki에 따라 각각 다르게 동작합니다. 예를 들어 Tiki에서는 led.set_color 구현이 내부적으로 tiki.set_led를 호출하여 실제 LED를 켜겠지만, ROS에선 만약 해당 LED가 없으면 그냥 로그로 대체하거나 무시하도록 구현될 것입니다. Controller와 LaneDetector도 유사한 방식으로 리팩토링됩니다. Controller는 motor.set_speed를 통해 속도를 제어하고, 필요 시 imu.get_yaw() 등을 호출해 회전 진행 상황을 확인할 수 있습니다. LaneDetector는 frame을 받아 mask = get_lane_mask(frame) -> offset = calc_lane_offset(mask) 등의 유틸리티 호출로 결과를 얻고, 임계치 비교 후 Controller의 메서드를 호출하거나 /cmd_vel 직접 퍼블리시하던 코드를 이제는 Controller API 호출로 대체합니다. 마지막으로, 구조 다이어그램을 간략히 텍스트로 표현하면:
+Main (robot.py) → 필요한 인터페이스 구현체 생성 (ROS or Tiki) → Controller, Detector 등에 주입 → 루프/콜백에서 각 객체 메서드 호출
+ArucoTrigger.process_frame → (유틸: ArUco 검출) → (유틸: 마커 유효성 판단) → DisplayInterface.log + LEDInterface.set_color → (유틸: 캡처조건) → Camera/프레임 활용 이미지 저장 → Controller/YOLO와 상호작용
+LaneDetector.process_frame → Camera로부터 영상 획득 (ROS에선 콜백 인자) → (유틸: 차선 마스크 생성) → (유틸: 차선 오프셋 계산) → (유틸: 포트홀 검사) → Controller에 주행 제어 명령 (controller.steer(left) 혹은 motor.set_speed 직접)
+Controller는 MotorInterface, IMUInterface를 사용하여 받은 명령을 실행하거나, 내부 로직(상태기계)에 따라 주기적으로 motor 명령을 업데이트
+이러한 리팩토링을 거치면, 코드가 플랫폼에 독립적인 계층(core 로직)과 플랫폼 의존적인 계층(interface 구현)으로 나누어져 관리됩니다. 결과적으로 ROS 노드로서도 동작하고 ROS 없이도 동작할 수 있는 유연한 구조가 되며, 각 기능별 코드가 잘 모듈화되어 이해하기 쉽고 수정하기 용이해집니다. 주요 클래스들은 본연의 역할에 집중하여 간결해졌고, 중복되던 코드들은 공통 함수로 합쳐졌으므로 전체 코드베이스의 일관성과 유지보수성이 개선됩니다. 필요한 경우 새로운 센서나 다른 하드웨어로 교체도 인터페이스 구현만 추가하면 되므로 확장성도 높아집니다.

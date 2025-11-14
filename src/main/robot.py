@@ -167,8 +167,8 @@ class Robot:
         # Controller 초기화 (인터페이스 주입)
         self.controller = Controller(motor_interface=self.motor)
         
-        # ArucoTrigger 초기화 (기존 방식 유지 - 향후 인터페이스 주입으로 확장 가능)
-        self.aruco = ArucoTrigger(cmd_topic="/cmd_vel")
+        # ArucoTrigger 초기화 (리팩토링: 인터페이스 주입)
+        self.aruco = ArucoTrigger(motor_interface=self.motor)
         
         # PIDController 초기화
         self.pid = PIDController(kp=0.65, ki=0.001, kd=0.01, integral_limit=2.0)
@@ -236,7 +236,7 @@ class Robot:
 
         # change mode (linear ↔ curved)
         is_linear = True
-        for he, le in zip(self.error_queue['heading'], self.error_queue['lat']):
+        for he, le in zip[tuple[int, int]](self.error_queue['heading'], self.error_queue['lat']):
             if not (abs(he) < 0.3):
                 is_linear = False
                 break
