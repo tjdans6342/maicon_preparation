@@ -1,0 +1,9 @@
+# 데이터셋 경로 (절대 경로 또는 상대 경로)
+path: src/drone/dataset  # 데이터셋 루트 폴더
+train: train/images      # 학습 이미지 폴더
+val: val/images          # 검증 이미지 폴더
+test: test/images        # 테스트 이미지 폴더 (선택 사항)
+
+# 클래스 정의
+nc: 1  # 클래스 개수 (예: 드론 1개)
+names: ['fire']  # 클래스 이름 리스트 (여러 개면 ['drone', 'bird', 'plane'] 형식)
