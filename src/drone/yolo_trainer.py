@@ -415,7 +415,7 @@ def validate_model(model_path: str = None):
     return metrics
 
 if __name__ == '__main__':
-    '''
+    
     # 640x640 변경 메인 동작
     letterbox_and_convert_yolo(
         img_pre_dir=IMG_PRE_DIR,
@@ -438,7 +438,7 @@ if __name__ == '__main__':
         seed=42,
         copy_mode=True
         )
-    '''
+    
     # 학습 실행
     results = train_yolo()
         
