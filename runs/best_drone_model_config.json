@@ -1,0 +1,8 @@
+{
+  "img_size": 224,
+  "class_names": [
+    "OK",
+    "NG"
+  ],
+  "model_type": "EfficientNet-B0"
+}

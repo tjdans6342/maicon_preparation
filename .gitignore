@@ -12,8 +12,6 @@ venv/
 # macOS / system files
 .DS_Store
 
-# yolo models
-runs/
 
 # drone datasets
 src/drone/dataset
